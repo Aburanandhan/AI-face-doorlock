@@ -21,39 +21,37 @@ LANDMARK_MODEL = "models/face_landmarker.task"
 KNOWN_FACES_DIR = "known_faces"
 LOG_FILE = "logs/access_log.txt"
 
-# Recognition settings
+# ------------------------------------------------------------
+# Recognition
+# ------------------------------------------------------------
+# We will print the actual scores so this can be tuned later.
 RECOGNITION_THRESHOLD = 0.45
 RECOGNITION_MARGIN = 0.08
 
-# Liveness settings
+# ------------------------------------------------------------
+# Liveness
+# ------------------------------------------------------------
 YAW_REQUIRED = 15.0
 
 EAR_OPEN_THRESHOLD = 0.23
 EAR_CLOSED_THRESHOLD = 0.19
 
 BLINK_CLOSED_FRAMES = 3
-OPEN_BASELINE_FRAMES = 15
 OPEN_AFTER_BLINK_FRAMES = 5
 
 CHALLENGE_TIMEOUT = 15
 
 
 # ============================================================
-# CAMERA DETECTION
+# CAMERA
 # ============================================================
 
 def open_camera():
-    """
-    Automatically search for a working webcam.
-
-    Rejects cameras that technically open but only return
-    black/empty frames.
-    """
 
     backends = [
         ("DirectShow", cv2.CAP_DSHOW),
         ("Media Foundation", cv2.CAP_MSMF),
-        ("Default", cv2.CAP_ANY),
+        ("Default", cv2.CAP_ANY)
     ]
 
     print("\nSearching for a working camera...")
@@ -67,50 +65,63 @@ def open_camera():
                 f"using {backend_name}..."
             )
 
-            cap = cv2.VideoCapture(camera_index, backend)
+            cap = cv2.VideoCapture(
+                camera_index,
+                backend
+            )
 
             if not cap.isOpened():
+
                 cap.release()
                 continue
 
-            # Give the camera a moment to initialize
             time.sleep(0.3)
 
             working = False
+            frame = None
 
             for _ in range(5):
 
-                ret, frame = cap.read()
+                ret, test_frame = cap.read()
 
-                if not ret or frame is None:
+                if not ret:
                     continue
 
-                if frame.size == 0:
+                if test_frame is None:
                     continue
 
-                # Check whether frame actually contains image data
-                min_value = int(frame.min())
-                max_value = int(frame.max())
-                mean_value = float(frame.mean())
-
-                # Reject completely black/empty frames
-                if max_value <= 5 or mean_value <= 1:
+                if test_frame.size == 0:
                     continue
 
+                min_value = int(test_frame.min())
+                max_value = int(test_frame.max())
+                mean_value = float(test_frame.mean())
+
+                # Reject black camera
+                if max_value <= 5:
+                    continue
+
+                if mean_value <= 1:
+                    continue
+
+                frame = test_frame
                 working = True
                 break
 
             if working:
 
                 print(
-                    f"\n[OK] Working camera found!"
+                    "\n[OK] Working camera found!"
                 )
+
                 print(
                     f"     Camera index : {camera_index}"
                 )
+
                 print(
                     f"     Backend      : {backend_name}"
                 )
+
                 print(
                     f"     Resolution   : "
                     f"{frame.shape[1]}x{frame.shape[0]}"
@@ -120,21 +131,26 @@ def open_camera():
 
             cap.release()
 
-    print("\n[ERROR] No working webcam was found.")
+    print(
+        "\n[ERROR] No working webcam was found."
+    )
+
     return None
 
 
 # ============================================================
-# LOAD FACE DETECTOR
+# FACE DETECTOR
 # ============================================================
 
 def load_detector():
 
     if not os.path.exists(DETECTOR_MODEL):
+
         print(
-            f"[ERROR] Face detector model not found:\n"
+            f"[ERROR] Detector model not found:\n"
             f"{DETECTOR_MODEL}"
         )
+
         return None
 
     try:
@@ -148,7 +164,9 @@ def load_detector():
             5000
         )
 
-        print("[OK] YuNet face detector loaded.")
+        print(
+            "[OK] YuNet face detector loaded."
+        )
 
         return detector
 
@@ -162,16 +180,18 @@ def load_detector():
 
 
 # ============================================================
-# LOAD FACE RECOGNIZER
+# FACE RECOGNIZER
 # ============================================================
 
 def load_recognizer():
 
     if not os.path.exists(RECOGNITION_MODEL):
+
         print(
-            f"[ERROR] Face recognition model not found:\n"
+            f"[ERROR] Recognition model not found:\n"
             f"{RECOGNITION_MODEL}"
         )
+
         return None
 
     try:
@@ -181,7 +201,9 @@ def load_recognizer():
             ""
         )
 
-        print("[OK] SFace face recognizer loaded.")
+        print(
+            "[OK] SFace face recognizer loaded."
+        )
 
         return recognizer
 
@@ -195,16 +217,18 @@ def load_recognizer():
 
 
 # ============================================================
-# LOAD MEDIAPIPE LANDMARKER
+# MEDIAPIPE LANDMARKER
 # ============================================================
 
 def load_landmarker():
 
     if not os.path.exists(LANDMARK_MODEL):
+
         print(
-            f"[ERROR] Face landmark model not found:\n"
+            f"[ERROR] Landmark model not found:\n"
             f"{LANDMARK_MODEL}"
         )
+
         return None
 
     try:
@@ -226,7 +250,9 @@ def load_landmarker():
             options
         )
 
-        print("[OK] MediaPipe face landmarker loaded.")
+        print(
+            "[OK] MediaPipe face landmarker loaded."
+        )
 
         return landmarker
 
@@ -240,14 +266,17 @@ def load_landmarker():
 
 
 # ============================================================
-# LOAD AUTHORIZED USERS
+# LOAD KNOWN FACES
 # ============================================================
 
 def load_known_faces():
 
     known_faces = {}
 
-    os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
+    os.makedirs(
+        KNOWN_FACES_DIR,
+        exist_ok=True
+    )
 
     files = [
         f
@@ -257,10 +286,8 @@ def load_known_faces():
 
     if not files:
 
-        print("\n[WARNING] No authorized users found.")
         print(
-            "Please use option 1 from the menu "
-            "to enroll a user first.\n"
+            "\n[WARNING] No authorized users found."
         )
 
         return known_faces
@@ -274,16 +301,27 @@ def load_known_faces():
 
         try:
 
-            feature = np.load(path)
+            feature = np.load(
+                path
+            )
 
             feature = feature.astype(
                 np.float32
             )
 
-            # Normalize feature
-            norm = np.linalg.norm(feature)
+            # Flatten feature if necessary
+            feature = feature.reshape(
+                1,
+                -1
+            )
+
+            # Normalize
+            norm = np.linalg.norm(
+                feature
+            )
 
             if norm > 0:
+
                 feature = feature / norm
 
             username = os.path.splitext(
@@ -293,7 +331,8 @@ def load_known_faces():
             known_faces[username] = feature
 
             print(
-                f"[OK] Loaded authorized user: {username}"
+                f"[OK] Loaded authorized user: "
+                f"{username}"
             )
 
         except Exception as e:
@@ -348,7 +387,7 @@ def log_access(username, status):
 
 
 # ============================================================
-# EYE ASPECT RATIO
+# DISTANCE
 # ============================================================
 
 def distance(p1, p2):
@@ -359,7 +398,14 @@ def distance(p1, p2):
     )
 
 
-def calculate_ear(landmarks, indices):
+# ============================================================
+# EYE ASPECT RATIO
+# ============================================================
+
+def calculate_ear(
+    landmarks,
+    indices
+):
 
     try:
 
@@ -370,22 +416,38 @@ def calculate_ear(landmarks, indices):
         p5 = landmarks[indices[4]]
         p6 = landmarks[indices[5]]
 
-        a = distance(p2, p6)
-        b = distance(p3, p5)
-        c = distance(p1, p4)
+        vertical_1 = distance(
+            p2,
+            p6
+        )
 
-        if c == 0:
+        vertical_2 = distance(
+            p3,
+            p5
+        )
+
+        horizontal = distance(
+            p1,
+            p4
+        )
+
+        if horizontal == 0:
+
             return 0
 
-        ear = (a + b) / (2.0 * c)
-
-        return ear
+        return (
+            vertical_1 +
+            vertical_2
+        ) / (
+            2.0 *
+            horizontal
+        )
 
     except Exception:
+
         return 0
 
 
-# MediaPipe Face Mesh-style eye landmark indices
 LEFT_EYE = [
     33,
     160,
@@ -406,10 +468,13 @@ RIGHT_EYE = [
 
 
 # ============================================================
-# LANDMARK EXTRACTION
+# MEDIAPIPE LANDMARKS
 # ============================================================
 
-def get_landmarks(landmarker, frame):
+def get_landmarks(
+    landmarker,
+    frame
+):
 
     try:
 
@@ -418,7 +483,7 @@ def get_landmarks(landmarker, frame):
             cv2.COLOR_BGR2RGB
         )
 
-        # Correct MediaPipe image creation
+        # Correct MediaPipe API
         mp_image = mp.Image(
             image_format=mp.ImageFormat.SRGB,
             data=rgb_frame
@@ -429,18 +494,26 @@ def get_landmarks(landmarker, frame):
         )
 
         if not result.face_landmarks:
+
             return None
 
-        face_landmarks = result.face_landmarks[0]
+        face_landmarks = (
+            result.face_landmarks[0]
+        )
 
-        h, w = frame.shape[:2]
+        height, width = frame.shape[:2]
 
         points = []
 
         for landmark in face_landmarks:
 
-            x = int(landmark.x * w)
-            y = int(landmark.y * h)
+            x = int(
+                landmark.x * width
+            )
+
+            y = int(
+                landmark.y * height
+            )
 
             points.append(
                 (x, y)
@@ -458,15 +531,12 @@ def get_landmarks(landmarker, frame):
 
 
 # ============================================================
-# HEAD YAW ESTIMATION
+# HEAD YAW
 # ============================================================
 
-def calculate_head_yaw(landmarks):
-
-    """
-    Estimate left/right head movement using
-    normalized nose position between the eyes.
-    """
+def calculate_head_yaw(
+    landmarks
+):
 
     try:
 
@@ -495,23 +565,28 @@ def calculate_head_yaw(landmarks):
         )
 
         eye_center = (
-            left_eye + right_eye
+            left_eye +
+            right_eye
         ) / 2.0
 
         eye_distance = np.linalg.norm(
-            right_eye - left_eye
+            right_eye -
+            left_eye
         )
 
         if eye_distance == 0:
+
             return 0
 
         normalized_position = (
-            nose[0] - eye_center[0]
+            nose[0] -
+            eye_center[0]
         ) / eye_distance
 
-        # Convert normalized position into
-        # approximate degrees
-        yaw = normalized_position * 60.0
+        yaw = (
+            normalized_position *
+            60.0
+        )
 
         return yaw
 
@@ -532,12 +607,13 @@ def recognize_face(
 ):
 
     if not known_faces:
+
         return "NO_USERS", 0.0
 
-    h, w = frame.shape[:2]
+    height, width = frame.shape[:2]
 
     detector.setInputSize(
-        (w, h)
+        (width, height)
     )
 
     try:
@@ -546,7 +622,11 @@ def recognize_face(
             frame
         )
 
-    except Exception:
+    except Exception as e:
+
+        print(
+            f"[WARNING] Face detection error: {e}"
+        )
 
         return "UNKNOWN", 0.0
 
@@ -554,7 +634,7 @@ def recognize_face(
 
         return "NO_FACE", 0.0
 
-    # Select largest face
+    # Largest face
     face = max(
         faces,
         key=lambda f: f[2] * f[3]
@@ -575,7 +655,14 @@ def recognize_face(
             np.float32
         )
 
-        norm = np.linalg.norm(feature)
+        feature = feature.reshape(
+            1,
+            -1
+        )
+
+        norm = np.linalg.norm(
+            feature
+        )
 
         if norm == 0:
 
@@ -586,7 +673,7 @@ def recognize_face(
     except Exception as e:
 
         print(
-            f"[WARNING] Recognition error: {e}"
+            f"[WARNING] Feature extraction error: {e}"
         )
 
         return "UNKNOWN", 0.0
@@ -604,70 +691,110 @@ def recognize_face(
             )
 
             scores.append(
-                (username, float(score))
+                (
+                    username,
+                    float(score)
+                )
             )
 
-        except Exception:
-            continue
+        except Exception as e:
+
+            print(
+                f"[WARNING] Match error "
+                f"for {username}: {e}"
+            )
 
     if not scores:
 
         return "UNKNOWN", 0.0
 
+    # Highest score first
     scores.sort(
         key=lambda x: x[1],
         reverse=True
     )
 
-    best_name, best_score = scores[0]
+    # --------------------------------------------------------
+    # PRINT SCORES
+    # --------------------------------------------------------
 
-    # Check second-best score
-    second_score = (
-        scores[1][1]
-        if len(scores) > 1
-        else 0.0
+    print(
+        "\n[RECOGNITION SCORES]"
     )
+
+    for username, score in scores:
+
+        print(
+            f"  {username}: {score:.4f}"
+        )
+
+    # --------------------------------------------------------
+    # Best match
+    # --------------------------------------------------------
+
+    best_name = scores[0][0]
+    best_score = scores[0][1]
+
+    if len(scores) > 1:
+
+        second_score = scores[1][1]
+
+    else:
+
+        second_score = 0.0
 
     margin = (
-        best_score - second_score
+        best_score -
+        second_score
     )
 
-    # Recognition decision
+    print(
+        f"  Best: {best_name}"
+    )
+
+    print(
+        f"  Best score: {best_score:.4f}"
+    )
+
+    print(
+        f"  Margin: {margin:.4f}"
+    )
+
+    print(
+        f"  Required threshold: "
+        f"{RECOGNITION_THRESHOLD:.4f}"
+    )
+
+    # --------------------------------------------------------
+    # Decision
+    # --------------------------------------------------------
+
     if best_score >= RECOGNITION_THRESHOLD:
 
-        if len(scores) == 1 or margin >= RECOGNITION_MARGIN:
+        # If only one authorized user exists
+        if len(scores) == 1:
 
-            return best_name, best_score
+            return (
+                best_name,
+                best_score
+            )
 
-    return "UNKNOWN", best_score
+        # Multiple users require margin
+        if margin >= RECOGNITION_MARGIN:
 
+            return (
+                best_name,
+                best_score
+            )
 
-# ============================================================
-# DRAW TEXT
-# ============================================================
-
-def draw_text(
-    frame,
-    text,
-    position,
-    scale=0.7,
-    thickness=2
-):
-
-    cv2.putText(
-        frame,
-        text,
-        position,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        (255, 255, 255),
-        thickness,
-        cv2.LINE_AA
+    return (
+        "UNKNOWN",
+        best_score
     )
 
 
 # ============================================================
-# MAIN DOOR LOCK SYSTEM
+# MAIN
 # ============================================================
 
 def start_door_lock():
@@ -678,26 +805,37 @@ def start_door_lock():
     print("=" * 60)
 
     # --------------------------------------------------------
-    # Load models
+    # Load detector
     # --------------------------------------------------------
 
     detector = load_detector()
 
     if detector is None:
+
         return
+
+    # --------------------------------------------------------
+    # Load recognizer
+    # --------------------------------------------------------
 
     recognizer = load_recognizer()
 
     if recognizer is None:
+
         return
+
+    # --------------------------------------------------------
+    # Load landmark model
+    # --------------------------------------------------------
 
     landmarker = load_landmarker()
 
     if landmarker is None:
+
         return
 
     # --------------------------------------------------------
-    # Load authorized users
+    # Load users
     # --------------------------------------------------------
 
     known_faces = load_known_faces()
@@ -709,32 +847,33 @@ def start_door_lock():
         )
 
         print(
-            "\nPlease choose:"
-        )
-        print(
-            "1. Enroll a new user"
-        )
-        print(
-            "2. Return to menu"
+            "Please enroll a user first."
         )
 
-        choice = input(
-            "\nEnter choice: "
-        ).strip()
+        try:
+            landmarker.close()
+        except Exception:
+            pass
 
         return
 
     # --------------------------------------------------------
-    # Open camera
+    # Camera
     # --------------------------------------------------------
 
     cap = open_camera()
 
     if cap is None:
+
+        try:
+            landmarker.close()
+        except Exception:
+            pass
+
         return
 
     # --------------------------------------------------------
-    # Liveness state
+    # State
     # --------------------------------------------------------
 
     blink_closed_count = 0
@@ -761,26 +900,24 @@ def start_door_lock():
 
     unlock_time = 0
 
-    # --------------------------------------------------------
-    # Challenge direction
-    # --------------------------------------------------------
+    last_recognition_time = 0
 
-    challenge_directions = [
-        "LEFT",
-        "RIGHT"
-    ]
-
-    # --------------------------------------------------------
-    # Main loop
-    # --------------------------------------------------------
+    # Prevent recognition from running
+    # unnecessarily many times
+    RECOGNITION_INTERVAL = 0.5
 
     print("\n")
     print("=" * 60)
     print("DOOR LOCK ACTIVE")
     print("=" * 60)
     print("Look at the camera.")
+    print("Blink and turn your head when requested.")
     print("Press Q to exit.")
     print("=" * 60)
+
+    # ========================================================
+    # LOOP
+    # ========================================================
 
     while True:
 
@@ -792,22 +929,16 @@ def start_door_lock():
                 "[WARNING] Could not read camera frame."
             )
 
-            time.sleep(0.1)
-
             continue
 
-        # ----------------------------------------------------
-        # Resize if necessary
-        # ----------------------------------------------------
-
-        frame_height, frame_width = frame.shape[:2]
+        height, width = frame.shape[:2]
 
         # ----------------------------------------------------
-        # Detect faces
+        # FACE DETECTION
         # ----------------------------------------------------
 
         detector.setInputSize(
-            (frame_width, frame_height)
+            (width, height)
         )
 
         try:
@@ -820,39 +951,31 @@ def start_door_lock():
 
             faces = None
 
-        # ----------------------------------------------------
-        # Default display
-        # ----------------------------------------------------
-
         status = "LOOKING FOR FACE"
 
-        status_color = (
-            255,
-            255,
-            255
-        )
-
         # ----------------------------------------------------
-        # No face
+        # NO FACE
         # ----------------------------------------------------
 
         if faces is None or len(faces) == 0:
 
             status = "NO FACE DETECTED"
 
-            # Reset temporary liveness state
             blink_closed_count = 0
             open_frames = 0
-            first_turn_detected = False
-            liveness_passed = False
 
             recognized_name = "UNKNOWN"
             recognized_score = 0.0
 
+            challenge_started = False
+            first_turn_detected = False
+            blink_detected = False
+            liveness_passed = False
+
         else:
 
             # ------------------------------------------------
-            # Select largest face
+            # Largest face
             # ------------------------------------------------
 
             face = max(
@@ -865,22 +988,28 @@ def start_door_lock():
                 face[:4]
             )
 
-            # Keep rectangle inside image
-            x = max(0, x)
-            y = max(0, y)
+            x = max(
+                0,
+                x
+            )
+
+            y = max(
+                0,
+                y
+            )
 
             w = min(
                 w,
-                frame_width - x
+                width - x
             )
 
             h = min(
                 h,
-                frame_height - y
+                height - y
             )
 
             # ------------------------------------------------
-            # Draw face box
+            # Draw face
             # ------------------------------------------------
 
             cv2.rectangle(
@@ -892,7 +1021,33 @@ def start_door_lock():
             )
 
             # ------------------------------------------------
-            # Get landmarks
+            # Recognition
+            # ------------------------------------------------
+
+            current_time = time.time()
+
+            if (
+                current_time -
+                last_recognition_time
+                >= RECOGNITION_INTERVAL
+            ):
+
+                (
+                    recognized_name,
+                    recognized_score
+                ) = recognize_face(
+                    detector,
+                    recognizer,
+                    frame,
+                    known_faces
+                )
+
+                last_recognition_time = (
+                    current_time
+                )
+
+            # ------------------------------------------------
+            # Landmarks
             # ------------------------------------------------
 
             landmarks = get_landmarks(
@@ -904,10 +1059,6 @@ def start_door_lock():
             ear = 0.0
 
             if landmarks is not None:
-
-                # --------------------------------------------
-                # Calculate eye aspect ratio
-                # --------------------------------------------
 
                 left_ear = calculate_ear(
                     landmarks,
@@ -925,7 +1076,7 @@ def start_door_lock():
                 ) / 2.0
 
                 # --------------------------------------------
-                # Blink detection
+                # Blink
                 # --------------------------------------------
 
                 if ear < EAR_CLOSED_THRESHOLD:
@@ -944,21 +1095,15 @@ def start_door_lock():
                     blink_closed_count = 0
 
                 # --------------------------------------------
-                # Open eye baseline
+                # Open eyes after blink
                 # --------------------------------------------
 
                 if (
-                    ear > EAR_OPEN_THRESHOLD
-                    and not blink_detected
+                    blink_detected
+                    and ear > EAR_OPEN_THRESHOLD
                 ):
 
                     open_frames += 1
-
-                else:
-
-                    if blink_detected:
-
-                        open_frames += 1
 
                 # --------------------------------------------
                 # Head yaw
@@ -969,18 +1114,7 @@ def start_door_lock():
                 )
 
             # ------------------------------------------------
-            # Recognition
-            # ------------------------------------------------
-
-            recognized_name, recognized_score = recognize_face(
-                detector,
-                recognizer,
-                frame,
-                known_faces
-            )
-
-            # ------------------------------------------------
-            # Start liveness challenge
+            # Start challenge
             # ------------------------------------------------
 
             if (
@@ -989,16 +1123,24 @@ def start_door_lock():
                 and recognized_name != "NO_USERS"
                 and not challenge_started
                 and not liveness_passed
+                and not access_granted
             ):
 
                 challenge_started = True
 
-                challenge_start_time = time.time()
-
-                required_direction = np.random.choice(
-                    challenge_directions
+                challenge_start_time = (
+                    time.time()
                 )
 
+                required_direction = (
+                    np.random.choice(
+                        ["LEFT", "RIGHT"]
+                    )
+                )
+
+                blink_detected = False
+                blink_closed_count = 0
+                open_frames = 0
                 first_turn_detected = False
 
                 print(
@@ -1007,32 +1149,37 @@ def start_door_lock():
                 )
 
             # ------------------------------------------------
-            # Liveness challenge
+            # LIVENESS
             # ------------------------------------------------
 
-            if challenge_started and not liveness_passed:
+            if (
+                challenge_started
+                and not liveness_passed
+            ):
 
                 elapsed = (
-                    time.time()
-                    - challenge_start_time
+                    time.time() -
+                    challenge_start_time
                 )
 
                 if elapsed > CHALLENGE_TIMEOUT:
 
                     print(
-                        "\n[LIVENESS] Challenge timed out."
+                        "\n[LIVENESS] "
+                        "Challenge timed out."
                     )
 
                     challenge_started = False
 
                     blink_detected = False
+                    blink_closed_count = 0
                     open_frames = 0
                     first_turn_detected = False
 
                 else:
 
                     # ----------------------------------------
-                    # Blink must happen
+                    # Blink first
                     # ----------------------------------------
 
                     if not blink_detected:
@@ -1040,7 +1187,7 @@ def start_door_lock():
                         status = "BLINK"
 
                     # ----------------------------------------
-                    # After blink, require head turn
+                    # Head movement
                     # ----------------------------------------
 
                     elif not first_turn_detected:
@@ -1050,27 +1197,30 @@ def start_door_lock():
                             + required_direction
                         )
 
-                        if required_direction == "LEFT":
+                        if (
+                            required_direction
+                            == "LEFT"
+                        ):
 
                             if yaw < -YAW_REQUIRED:
 
                                 first_turn_detected = True
 
-                        elif required_direction == "RIGHT":
+                        else:
 
                             if yaw > YAW_REQUIRED:
 
                                 first_turn_detected = True
 
                     # ----------------------------------------
-                    # Liveness completed
+                    # Liveness success
                     # ----------------------------------------
 
                     if (
                         blink_detected
                         and first_turn_detected
-                        and open_frames
-                        >= OPEN_AFTER_BLINK_FRAMES
+                        and open_frames >=
+                        OPEN_AFTER_BLINK_FRAMES
                     ):
 
                         liveness_passed = True
@@ -1082,22 +1232,20 @@ def start_door_lock():
                         )
 
             # ------------------------------------------------
-            # Access decision
+            # ACCESS DECISION
             # ------------------------------------------------
 
             if liveness_passed:
 
-                if recognized_name != "UNKNOWN":
-
-                    status = "ACCESS GRANTED"
+                if (
+                    recognized_name != "UNKNOWN"
+                    and recognized_name != "NO_FACE"
+                ):
 
                     access_granted = True
 
-                    unlock_time = time.time()
-
-                    log_access(
-                        recognized_name,
-                        "GRANTED"
+                    unlock_time = (
+                        time.time()
                     )
 
                     print(
@@ -1106,80 +1254,88 @@ def start_door_lock():
                     )
 
                     print(
-                        "Door unlocked."
+                        f"[MATCH SCORE] "
+                        f"{recognized_score:.4f}"
                     )
 
-                    # ------------------------------------------------
-                    # Display unlock for 5 seconds
-                    # ------------------------------------------------
+                    print(
+                        "[DOOR] UNLOCKED"
+                    )
 
-                    liveness_passed = False
+                    log_access(
+                        recognized_name,
+                        "GRANTED"
+                    )
 
                 else:
 
-                    status = "ACCESS DENIED"
+                    print(
+                        "\n[ACCESS DENIED]"
+                    )
 
-                    access_granted = False
+                    print(
+                        f"[BEST SCORE] "
+                        f"{recognized_score:.4f}"
+                    )
 
                     log_access(
                         "UNKNOWN",
                         "DENIED"
                     )
 
-                    print(
-                        "\n[ACCESS DENIED]"
-                    )
+                # Reset challenge
+                liveness_passed = False
+                blink_detected = False
+                blink_closed_count = 0
+                open_frames = 0
+                first_turn_detected = False
 
-                    # Reset
-                    blink_detected = False
-                    open_frames = 0
-                    first_turn_detected = False
-                    liveness_passed = False
+        # ====================================================
+        # DOOR TIMER
+        # ====================================================
 
-            # ------------------------------------------------
-            # Unlock timer
-            # ------------------------------------------------
+        if access_granted:
 
-            if access_granted:
+            elapsed_unlock = (
+                time.time() -
+                unlock_time
+            )
 
-                elapsed_unlock = (
-                    time.time()
-                    - unlock_time
+            if elapsed_unlock >= 5:
+
+                access_granted = False
+
+                recognized_name = "UNKNOWN"
+                recognized_score = 0.0
+
+                blink_detected = False
+                blink_closed_count = 0
+                open_frames = 0
+                first_turn_detected = False
+
+                print(
+                    "\n[DOOR] Locked again."
                 )
 
-                if elapsed_unlock >= 5:
-
-                    access_granted = False
-
-                    recognized_name = "UNKNOWN"
-
-                    recognized_score = 0.0
-
-                    blink_detected = False
-                    open_frames = 0
-                    first_turn_detected = False
-
-                    print(
-                        "\nDoor locked again."
-                    )
-
         # ====================================================
-        # DISPLAY INFORMATION
+        # DISPLAY
         # ====================================================
 
-        # Status
         cv2.putText(
             frame,
             status,
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            status_color,
+            0.8,
+            (255, 255, 255),
             2,
             cv2.LINE_AA
         )
 
-        # Recognition information
+        # ----------------------------------------------------
+        # User
+        # ----------------------------------------------------
+
         if recognized_name not in [
             "UNKNOWN",
             "NO_FACE",
@@ -1191,7 +1347,7 @@ def start_door_lock():
                 f"User: {recognized_name}",
                 (20, 75),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.65,
                 (255, 255, 255),
                 2,
                 cv2.LINE_AA
@@ -1199,16 +1355,19 @@ def start_door_lock():
 
             cv2.putText(
                 frame,
-                f"Similarity: {recognized_score:.3f}",
+                f"Score: {recognized_score:.3f}",
                 (20, 105),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.65,
                 (255, 255, 255),
                 2,
                 cv2.LINE_AA
             )
 
-        # Liveness information
+        # ----------------------------------------------------
+        # Blink
+        # ----------------------------------------------------
+
         blink_text = (
             "YES"
             if blink_detected
@@ -1220,13 +1379,16 @@ def start_door_lock():
             f"Blink: {blink_text}",
             (20, 140),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
+            0.6,
             (255, 255, 255),
             2,
             cv2.LINE_AA
         )
 
-        # Door state
+        # ----------------------------------------------------
+        # Door
+        # ----------------------------------------------------
+
         if access_granted:
 
             door_text = "DOOR: UNLOCKED"
@@ -1238,39 +1400,48 @@ def start_door_lock():
         cv2.putText(
             frame,
             door_text,
-            (20, frame_height - 30),
+            (20, height - 30),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
+            0.75,
             (255, 255, 255),
             2,
             cv2.LINE_AA
         )
 
-        # Challenge instruction
+        # ----------------------------------------------------
+        # Challenge
+        # ----------------------------------------------------
+
         if challenge_started:
 
-            if required_direction:
+            if not blink_detected:
+
+                challenge_text = "BLINK"
+
+            elif not first_turn_detected:
 
                 challenge_text = (
-                    f"TURN {required_direction}"
+                    "TURN "
+                    + required_direction
                 )
 
-                cv2.putText(
-                    frame,
-                    challenge_text,
-                    (
-                        20,
-                        frame_height - 65
-                    ),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.75,
-                    (255, 255, 255),
-                    2,
-                    cv2.LINE_AA
-                )
+            else:
+
+                challenge_text = "PROCESSING..."
+
+            cv2.putText(
+                frame,
+                challenge_text,
+                (20, height - 65),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA
+            )
 
         # ----------------------------------------------------
-        # Show camera
+        # Camera window
         # ----------------------------------------------------
 
         cv2.imshow(
@@ -1297,8 +1468,11 @@ def start_door_lock():
     cv2.destroyAllWindows()
 
     try:
+
         landmarker.close()
+
     except Exception:
+
         pass
 
     print(
@@ -1307,7 +1481,7 @@ def start_door_lock():
 
 
 # ============================================================
-# PROGRAM ENTRY
+# ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
