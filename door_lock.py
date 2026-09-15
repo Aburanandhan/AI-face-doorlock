@@ -3,11 +3,11 @@ import numpy as np
 import os
 import time
 import math
-from datetime import datetime
+from collections import deque
 
-import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+import mediapipe as mp
 
 
 # ============================================================
@@ -21,137 +21,939 @@ LANDMARK_MODEL = "models/face_landmarker.task"
 KNOWN_FACES_DIR = "known_faces"
 LOG_FILE = "logs/access_log.txt"
 
-# ------------------------------------------------------------
-# Recognition
-# ------------------------------------------------------------
-# We will print the actual scores so this can be tuned later.
 RECOGNITION_THRESHOLD = 0.45
 RECOGNITION_MARGIN = 0.08
 
-# ------------------------------------------------------------
+CAMERA_MAX_INDEX = 5
+
 # Liveness
-# ------------------------------------------------------------
 YAW_REQUIRED = 15.0
 
 EAR_OPEN_THRESHOLD = 0.23
 EAR_CLOSED_THRESHOLD = 0.19
 
 BLINK_CLOSED_FRAMES = 3
-OPEN_AFTER_BLINK_FRAMES = 5
+OPEN_BASELINE_FRAMES = 10
+OPEN_AFTER_BLINK_FRAMES = 3
 
 CHALLENGE_TIMEOUT = 15
 
+# Number of recognition samples during ONE authentication attempt
+RECOGNITION_SAMPLES = 5
+
 
 # ============================================================
-# CAMERA
+# CAMERA SEARCH
 # ============================================================
 
-def open_camera():
+def open_working_camera():
+
+    print("\nSearching for a working camera...")
 
     backends = [
         ("DirectShow", cv2.CAP_DSHOW),
         ("Media Foundation", cv2.CAP_MSMF),
-        ("Default", cv2.CAP_ANY)
+        ("Default", cv2.CAP_ANY),
     ]
 
-    print("\nSearching for a working camera...")
-
-    for camera_index in range(6):
+    for index in range(CAMERA_MAX_INDEX + 1):
 
         for backend_name, backend in backends:
 
             print(
-                f"  Trying camera {camera_index} "
-                f"using {backend_name}..."
+                f"  Trying camera {index} using {backend_name}..."
             )
 
-            cap = cv2.VideoCapture(
-                camera_index,
-                backend
-            )
+            cap = cv2.VideoCapture(index, backend)
 
             if not cap.isOpened():
-
                 cap.release()
                 continue
 
+            # Give camera time to initialize
             time.sleep(0.3)
 
-            working = False
-            frame = None
+            ret, frame = cap.read()
 
-            for _ in range(5):
+            if not ret or frame is None:
+                cap.release()
+                continue
 
-                ret, test_frame = cap.read()
+            if frame.size == 0:
+                cap.release()
+                continue
 
-                if not ret:
-                    continue
+            mean_value = float(np.mean(frame))
+            min_value = int(np.min(frame))
+            max_value = int(np.max(frame))
 
-                if test_frame is None:
-                    continue
+            # Reject completely black camera
+            if max_value <= 5 or mean_value < 2:
+                cap.release()
+                continue
 
-                if test_frame.size == 0:
-                    continue
+            print("\n[OK] Working camera found!")
+            print(f"     Camera index : {index}")
+            print(f"     Backend      : {backend_name}")
+            print(
+                f"     Resolution   : "
+                f"{frame.shape[1]}x{frame.shape[0]}"
+            )
 
-                min_value = int(test_frame.min())
-                max_value = int(test_frame.max())
-                mean_value = float(test_frame.mean())
-
-                # Reject black camera
-                if max_value <= 5:
-                    continue
-
-                if mean_value <= 1:
-                    continue
-
-                frame = test_frame
-                working = True
-                break
-
-            if working:
-
-                print(
-                    "\n[OK] Working camera found!"
-                )
-
-                print(
-                    f"     Camera index : {camera_index}"
-                )
-
-                print(
-                    f"     Backend      : {backend_name}"
-                )
-
-                print(
-                    f"     Resolution   : "
-                    f"{frame.shape[1]}x{frame.shape[0]}"
-                )
-
-                return cap
-
-            cap.release()
-
-    print(
-        "\n[ERROR] No working webcam was found."
-    )
+            return cap
 
     return None
 
 
 # ============================================================
-# FACE DETECTOR
+# EAR CALCULATION
 # ============================================================
 
-def load_detector():
+def calculate_ear(landmarks, eye_indices):
+
+    points = []
+
+    for index in eye_indices:
+
+        landmark = landmarks[index]
+
+        points.append(
+            np.array(
+                [
+                    landmark.x,
+                    landmark.y
+                ],
+                dtype=np.float32
+            )
+        )
+
+    p1, p2, p3, p4, p5, p6 = points
+
+    vertical_1 = np.linalg.norm(p2 - p6)
+    vertical_2 = np.linalg.norm(p3 - p5)
+
+    horizontal = np.linalg.norm(p1 - p4)
+
+    if horizontal == 0:
+        return 0.0
+
+    ear = (
+        vertical_1 + vertical_2
+    ) / (2.0 * horizontal)
+
+    return float(ear)
+
+
+# ============================================================
+# APPROXIMATE HEAD YAW
+# ============================================================
+
+def calculate_yaw(landmarks):
+
+    # Approximate nose position
+    nose = landmarks[1]
+
+    # Left and right cheek / face points
+    left_face = landmarks[234]
+    right_face = landmarks[454]
+
+    face_width = abs(
+        right_face.x - left_face.x
+    )
+
+    if face_width < 0.001:
+        return 0.0
+
+    nose_position = (
+        nose.x - left_face.x
+    ) / face_width
+
+    # Convert normalized position to approximate yaw
+    yaw = (
+        nose_position - 0.5
+    ) * 90.0
+
+    return float(yaw)
+
+
+# ============================================================
+# LOAD AUTHORIZED FACES
+# ============================================================
+
+def load_known_faces():
+
+    known_faces = {}
+
+    if not os.path.exists(KNOWN_FACES_DIR):
+        os.makedirs(KNOWN_FACES_DIR)
+
+    files = os.listdir(KNOWN_FACES_DIR)
+
+    for filename in files:
+
+        if not filename.lower().endswith(".npy"):
+            continue
+
+        path = os.path.join(
+            KNOWN_FACES_DIR,
+            filename
+        )
+
+        try:
+
+            feature = np.load(path)
+
+            name = os.path.splitext(filename)[0]
+
+            known_faces[name] = feature
+
+            print(
+                f"[OK] Loaded authorized user: {name}"
+            )
+
+        except Exception as e:
+
+            print(
+                f"[ERROR] Could not load {filename}: {e}"
+            )
+
+    print(
+        f"\nTotal authorized users: "
+        f"{len(known_faces)}"
+    )
+
+    return known_faces
+
+
+# ============================================================
+# FACE RECOGNITION
+# ============================================================
+
+def recognize_face(
+    frame,
+    detector,
+    recognizer,
+    known_faces,
+    print_scores=True
+):
+
+    height, width = frame.shape[:2]
+
+    detector.setInputSize(
+        (width, height)
+    )
+
+    _, faces = detector.detect(frame)
+
+    if faces is None or len(faces) == 0:
+        return None, 0.0, 0.0
+
+    # Use largest detected face
+    face = max(
+        faces,
+        key=lambda f: f[2] * f[3]
+    )
+
+    try:
+
+        aligned = recognizer.alignCrop(
+            frame,
+            face
+        )
+
+        feature = recognizer.feature(
+            aligned
+        )
+
+    except Exception:
+        return None, 0.0, 0.0
+
+    scores = {}
+
+    for name, known_feature in known_faces.items():
+
+        try:
+
+            score = recognizer.match(
+                feature,
+                known_feature,
+                cv2.FaceRecognizerSF_FR_COSINE
+            )
+
+            scores[name] = float(score)
+
+        except Exception:
+            continue
+
+    if not scores:
+        return None, 0.0, 0.0
+
+    sorted_scores = sorted(
+        scores.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    best_name, best_score = sorted_scores[0]
+
+    if len(sorted_scores) > 1:
+        second_score = sorted_scores[1][1]
+    else:
+        second_score = 0.0
+
+    margin = best_score - second_score
+
+    if print_scores:
+
+        print("\n[RECOGNITION]")
+
+        for name, score in sorted_scores:
+            print(
+                f"  {name}: {score:.4f}"
+            )
+
+        print(
+            f"  Best: {best_name}"
+        )
+
+        print(
+            f"  Score: {best_score:.4f}"
+        )
+
+        print(
+            f"  Margin: {margin:.4f}"
+        )
+
+    return best_name, best_score, margin
+
+
+# ============================================================
+# LOG ACCESS
+# ============================================================
+
+def log_access(name, score, granted):
+
+    os.makedirs(
+        os.path.dirname(LOG_FILE),
+        exist_ok=True
+    )
+
+    timestamp = time.strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    status = (
+        "GRANTED"
+        if granted
+        else "DENIED"
+    )
+
+    with open(
+        LOG_FILE,
+        "a",
+        encoding="utf-8"
+    ) as file:
+
+        file.write(
+            f"{timestamp} | "
+            f"{name} | "
+            f"{status} | "
+            f"{score:.4f}\n"
+        )
+
+
+# ============================================================
+# MEDIAPIPE LANDMARKER
+# ============================================================
+
+def create_landmarker():
+
+    base_options = python.BaseOptions(
+        model_asset_path=LANDMARK_MODEL
+    )
+
+    options = vision.FaceLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.IMAGE,
+        num_faces=1
+    )
+
+    landmarker = vision.FaceLandmarker.create_from_options(
+        options
+    )
+
+    return landmarker
+
+
+# ============================================================
+# MEDIAPIPE LANDMARK DETECTION
+# ============================================================
+
+def get_landmarks(frame, landmarker):
+
+    rgb_frame = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2RGB
+    )
+
+    mp_image = mp.Image(
+        image_format=mp.ImageFormat.SRGB,
+        data=rgb_frame
+    )
+
+    result = landmarker.detect(
+        mp_image
+    )
+
+    if not result.face_landmarks:
+        return None
+
+    return result.face_landmarks[0]
+
+
+# ============================================================
+# LIVENESS
+# ============================================================
+
+def perform_liveness(
+    cap,
+    landmarker
+):
+
+    print("\n============================================================")
+    print("LIVENESS VERIFICATION")
+    print("============================================================")
+
+    print("Please look straight at the camera.")
+
+    start_time = time.time()
+
+    open_frames = 0
+    closed_frames = 0
+
+    blink_detected = False
+
+    yaw_challenge = None
+    yaw_completed = False
+
+    # --------------------------------------------------------
+    # Step 1: Wait for eyes-open baseline
+    # --------------------------------------------------------
+
+    while time.time() - start_time < CHALLENGE_TIMEOUT:
+
+        ret, frame = cap.read()
+
+        if not ret:
+            continue
+
+        landmarks = get_landmarks(
+            frame,
+            landmarker
+        )
+
+        if landmarks is None:
+            cv2.imshow(
+                "AI Face Door Lock",
+                frame
+            )
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                return False
+
+            continue
+
+        left_ear = calculate_ear(
+            landmarks,
+            [33, 160, 158, 133, 153, 144]
+        )
+
+        right_ear = calculate_ear(
+            landmarks,
+            [362, 385, 387, 263, 373, 380]
+        )
+
+        ear = (
+            left_ear + right_ear
+        ) / 2.0
+
+        if ear > EAR_OPEN_THRESHOLD:
+
+            open_frames += 1
+
+        else:
+
+            open_frames = 0
+
+        if open_frames >= OPEN_BASELINE_FRAMES:
+            break
+
+        cv2.putText(
+            frame,
+            "Look at camera",
+            (30, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2
+        )
+
+        cv2.imshow(
+            "AI Face Door Lock",
+            frame
+        )
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            return False
+
+    # --------------------------------------------------------
+    # Step 2: Blink
+    # --------------------------------------------------------
+
+    print("\n[LIVENESS] Blink once.")
+
+    blink_start = time.time()
+
+    while time.time() - blink_start < CHALLENGE_TIMEOUT:
+
+        ret, frame = cap.read()
+
+        if not ret:
+            continue
+
+        landmarks = get_landmarks(
+            frame,
+            landmarker
+        )
+
+        if landmarks is None:
+            continue
+
+        left_ear = calculate_ear(
+            landmarks,
+            [33, 160, 158, 133, 153, 144]
+        )
+
+        right_ear = calculate_ear(
+            landmarks,
+            [362, 385, 387, 263, 373, 380]
+        )
+
+        ear = (
+            left_ear + right_ear
+        ) / 2.0
+
+        if ear < EAR_CLOSED_THRESHOLD:
+
+            closed_frames += 1
+
+        else:
+
+            if closed_frames >= BLINK_CLOSED_FRAMES:
+
+                blink_detected = True
+
+            closed_frames = 0
+
+        if blink_detected:
+
+            break
+
+        cv2.putText(
+            frame,
+            "BLINK",
+            (30, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (0, 255, 255),
+            2
+        )
+
+        cv2.imshow(
+            "AI Face Door Lock",
+            frame
+        )
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            return False
+
+    if not blink_detected:
+
+        print("[LIVENESS] Blink not detected.")
+
+        return False
+
+    print("[LIVENESS] Blink detected.")
+
+    # --------------------------------------------------------
+    # Step 3: Head turn
+    # --------------------------------------------------------
+
+    yaw_challenge = np.random.choice(
+        ["LEFT", "RIGHT"]
+    )
+
+    print(
+        f"[LIVENESS] Turn your head "
+        f"{yaw_challenge}"
+    )
+
+    turn_start = time.time()
+
+    while time.time() - turn_start < CHALLENGE_TIMEOUT:
+
+        ret, frame = cap.read()
+
+        if not ret:
+            continue
+
+        landmarks = get_landmarks(
+            frame,
+            landmarker
+        )
+
+        if landmarks is None:
+            continue
+
+        yaw = calculate_yaw(
+            landmarks
+        )
+
+        cv2.putText(
+            frame,
+            f"TURN {yaw_challenge}",
+            (30, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (255, 255, 0),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"Yaw: {yaw:.1f}",
+            (30, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.imshow(
+            "AI Face Door Lock",
+            frame
+        )
+
+        if yaw_challenge == "LEFT":
+
+            if yaw < -YAW_REQUIRED:
+
+                yaw_completed = True
+                break
+
+        else:
+
+            if yaw > YAW_REQUIRED:
+
+                yaw_completed = True
+                break
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            return False
+
+    if not yaw_completed:
+
+        print(
+            "[LIVENESS] Head movement not detected."
+        )
+
+        return False
+
+    print("[LIVENESS] Head movement detected.")
+    print("[LIVENESS] PASSED")
+
+    return True
+
+
+# ============================================================
+# ONE AUTHENTICATION ATTEMPT
+# ============================================================
+
+def authenticate(
+    cap,
+    detector,
+    recognizer,
+    landmarker,
+    known_faces
+):
+
+    print("\n")
+    print("============================================================")
+    print("AUTHENTICATION")
+    print("============================================================")
+
+    print("Look at the camera.")
+
+    # --------------------------------------------------------
+    # Collect recognition samples ONCE
+    # --------------------------------------------------------
+
+    recognition_results = []
+
+    start_time = time.time()
+
+    while (
+        len(recognition_results)
+        < RECOGNITION_SAMPLES
+        and time.time() - start_time < 8
+    ):
+
+        ret, frame = cap.read()
+
+        if not ret:
+            continue
+
+        name, score, margin = recognize_face(
+            frame,
+            detector,
+            recognizer,
+            known_faces,
+            print_scores=False
+        )
+
+        if name is not None:
+
+            recognition_results.append(
+                (name, score, margin)
+            )
+
+        cv2.putText(
+            frame,
+            "VERIFYING FACE...",
+            (30, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 255),
+            2
+        )
+
+        cv2.imshow(
+            "AI Face Door Lock",
+            frame
+        )
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            return False
+
+    if not recognition_results:
+
+        print(
+            "[ERROR] No face could be recognized."
+        )
+
+        return False
+
+    # --------------------------------------------------------
+    # Determine best identity from collected samples
+    # --------------------------------------------------------
+
+    grouped = {}
+
+    for name, score, margin in recognition_results:
+
+        if name not in grouped:
+            grouped[name] = []
+
+        grouped[name].append(score)
+
+    average_scores = {}
+
+    for name, scores in grouped.items():
+
+        average_scores[name] = float(
+            np.mean(scores)
+        )
+
+    best_name = max(
+        average_scores,
+        key=average_scores.get
+    )
+
+    best_average = average_scores[
+        best_name
+    ]
+
+    # Find second-best average
+    sorted_average = sorted(
+        average_scores.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    if len(sorted_average) > 1:
+
+        second_average = sorted_average[1][1]
+
+    else:
+
+        second_average = 0.0
+
+    final_margin = (
+        best_average - second_average
+    )
+
+    # --------------------------------------------------------
+    # Display ONE recognition result
+    # --------------------------------------------------------
+
+    print("\n============================================================")
+    print("FACE VERIFICATION RESULT")
+    print("============================================================")
+
+    for name, scores in grouped.items():
+
+        print(
+            f"{name}: "
+            f"average={np.mean(scores):.4f}, "
+            f"best={np.max(scores):.4f}"
+        )
+
+    print(
+        f"\nBest match : {best_name}"
+    )
+
+    print(
+        f"Average score : {best_average:.4f}"
+    )
+
+    print(
+        f"Margin : {final_margin:.4f}"
+    )
+
+    print(
+        f"Threshold : {RECOGNITION_THRESHOLD:.4f}"
+    )
+
+    # --------------------------------------------------------
+    # LIVENESS
+    # --------------------------------------------------------
+
+    liveness_passed = perform_liveness(
+        cap,
+        landmarker
+    )
+
+    if not liveness_passed:
+
+        print("\n[ACCESS DENIED]")
+        print("[REASON] Liveness verification failed.")
+
+        log_access(
+            best_name,
+            best_average,
+            False
+        )
+
+        return False
+
+    # --------------------------------------------------------
+    # FINAL DECISION
+    # --------------------------------------------------------
+
+    recognized = (
+        best_average >= RECOGNITION_THRESHOLD
+        and final_margin >= RECOGNITION_MARGIN
+    )
+
+    if recognized:
+
+        print("\n============================================================")
+        print("[ACCESS GRANTED]")
+        print(f"Authorized user: {best_name}")
+        print(
+            f"Match score: {best_average:.4f}"
+        )
+        print("[DOOR] UNLOCKED")
+        print("============================================================")
+
+        log_access(
+            best_name,
+            best_average,
+            True
+        )
+
+        return True
+
+    else:
+
+        print("\n============================================================")
+        print("[ACCESS DENIED]")
+        print(
+            f"Best match: {best_name}"
+        )
+        print(
+            f"Match score: {best_average:.4f}"
+        )
+        print(
+            f"Required: {RECOGNITION_THRESHOLD:.4f}"
+        )
+        print("[DOOR] LOCKED")
+        print("============================================================")
+
+        log_access(
+            best_name,
+            best_average,
+            False
+        )
+
+        return False
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print("\n")
+    print("============================================================")
+    print("           AI FACE DOOR LOCK")
+    print("============================================================")
+
+    # --------------------------------------------------------
+    # Check models
+    # --------------------------------------------------------
 
     if not os.path.exists(DETECTOR_MODEL):
 
         print(
-            f"[ERROR] Detector model not found:\n"
+            f"[ERROR] Missing detector model:\n"
             f"{DETECTOR_MODEL}"
         )
 
-        return None
+        return
+
+    if not os.path.exists(RECOGNITION_MODEL):
+
+        print(
+            f"[ERROR] Missing recognition model:\n"
+            f"{RECOGNITION_MODEL}"
+        )
+
+        return
+
+    if not os.path.exists(LANDMARK_MODEL):
+
+        print(
+            f"[ERROR] Missing landmark model:\n"
+            f"{LANDMARK_MODEL}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Load YuNet
+    # --------------------------------------------------------
 
     try:
 
@@ -168,31 +970,17 @@ def load_detector():
             "[OK] YuNet face detector loaded."
         )
 
-        return detector
-
     except Exception as e:
 
         print(
-            f"[ERROR] Could not load face detector:\n{e}"
+            f"[ERROR] YuNet loading failed: {e}"
         )
 
-        return None
+        return
 
-
-# ============================================================
-# FACE RECOGNIZER
-# ============================================================
-
-def load_recognizer():
-
-    if not os.path.exists(RECOGNITION_MODEL):
-
-        print(
-            f"[ERROR] Recognition model not found:\n"
-            f"{RECOGNITION_MODEL}"
-        )
-
-        return None
+    # --------------------------------------------------------
+    # Load SFace
+    # --------------------------------------------------------
 
     try:
 
@@ -205,637 +993,36 @@ def load_recognizer():
             "[OK] SFace face recognizer loaded."
         )
 
-        return recognizer
-
     except Exception as e:
 
         print(
-            f"[ERROR] Could not load face recognizer:\n{e}"
+            f"[ERROR] SFace loading failed: {e}"
         )
 
-        return None
+        return
 
-
-# ============================================================
-# MEDIAPIPE LANDMARKER
-# ============================================================
-
-def load_landmarker():
-
-    if not os.path.exists(LANDMARK_MODEL):
-
-        print(
-            f"[ERROR] Landmark model not found:\n"
-            f"{LANDMARK_MODEL}"
-        )
-
-        return None
+    # --------------------------------------------------------
+    # Load MediaPipe
+    # --------------------------------------------------------
 
     try:
 
-        base_options = python.BaseOptions(
-            model_asset_path=LANDMARK_MODEL
-        )
-
-        options = vision.FaceLandmarkerOptions(
-            base_options=base_options,
-            running_mode=vision.RunningMode.IMAGE,
-            num_faces=1,
-            min_face_detection_confidence=0.5,
-            min_face_presence_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-
-        landmarker = vision.FaceLandmarker.create_from_options(
-            options
-        )
+        landmarker = create_landmarker()
 
         print(
             "[OK] MediaPipe face landmarker loaded."
         )
 
-        return landmarker
-
     except Exception as e:
 
         print(
-            f"[ERROR] Could not load MediaPipe landmarker:\n{e}"
+            f"[ERROR] MediaPipe loading failed: {e}"
         )
-
-        return None
-
-
-# ============================================================
-# LOAD KNOWN FACES
-# ============================================================
-
-def load_known_faces():
-
-    known_faces = {}
-
-    os.makedirs(
-        KNOWN_FACES_DIR,
-        exist_ok=True
-    )
-
-    files = [
-        f
-        for f in os.listdir(KNOWN_FACES_DIR)
-        if f.lower().endswith(".npy")
-    ]
-
-    if not files:
-
-        print(
-            "\n[WARNING] No authorized users found."
-        )
-
-        return known_faces
-
-    for filename in files:
-
-        path = os.path.join(
-            KNOWN_FACES_DIR,
-            filename
-        )
-
-        try:
-
-            feature = np.load(
-                path
-            )
-
-            feature = feature.astype(
-                np.float32
-            )
-
-            # Flatten feature if necessary
-            feature = feature.reshape(
-                1,
-                -1
-            )
-
-            # Normalize
-            norm = np.linalg.norm(
-                feature
-            )
-
-            if norm > 0:
-
-                feature = feature / norm
-
-            username = os.path.splitext(
-                filename
-            )[0]
-
-            known_faces[username] = feature
-
-            print(
-                f"[OK] Loaded authorized user: "
-                f"{username}"
-            )
-
-        except Exception as e:
-
-            print(
-                f"[WARNING] Could not load "
-                f"{filename}: {e}"
-            )
-
-    print(
-        f"\nTotal authorized users: "
-        f"{len(known_faces)}"
-    )
-
-    return known_faces
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-def log_access(username, status):
-
-    os.makedirs(
-        os.path.dirname(LOG_FILE),
-        exist_ok=True
-    )
-
-    timestamp = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    try:
-
-        with open(
-            LOG_FILE,
-            "a",
-            encoding="utf-8"
-        ) as file:
-
-            file.write(
-                f"{timestamp} | "
-                f"{username} | "
-                f"{status}\n"
-            )
-
-    except Exception as e:
-
-        print(
-            f"[WARNING] Could not write log: {e}"
-        )
-
-
-# ============================================================
-# DISTANCE
-# ============================================================
-
-def distance(p1, p2):
-
-    return math.sqrt(
-        (p1[0] - p2[0]) ** 2 +
-        (p1[1] - p2[1]) ** 2
-    )
-
-
-# ============================================================
-# EYE ASPECT RATIO
-# ============================================================
-
-def calculate_ear(
-    landmarks,
-    indices
-):
-
-    try:
-
-        p1 = landmarks[indices[0]]
-        p2 = landmarks[indices[1]]
-        p3 = landmarks[indices[2]]
-        p4 = landmarks[indices[3]]
-        p5 = landmarks[indices[4]]
-        p6 = landmarks[indices[5]]
-
-        vertical_1 = distance(
-            p2,
-            p6
-        )
-
-        vertical_2 = distance(
-            p3,
-            p5
-        )
-
-        horizontal = distance(
-            p1,
-            p4
-        )
-
-        if horizontal == 0:
-
-            return 0
-
-        return (
-            vertical_1 +
-            vertical_2
-        ) / (
-            2.0 *
-            horizontal
-        )
-
-    except Exception:
-
-        return 0
-
-
-LEFT_EYE = [
-    33,
-    160,
-    158,
-    133,
-    153,
-    144
-]
-
-RIGHT_EYE = [
-    362,
-    385,
-    387,
-    263,
-    373,
-    380
-]
-
-
-# ============================================================
-# MEDIAPIPE LANDMARKS
-# ============================================================
-
-def get_landmarks(
-    landmarker,
-    frame
-):
-
-    try:
-
-        rgb_frame = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2RGB
-        )
-
-        # Correct MediaPipe API
-        mp_image = mp.Image(
-            image_format=mp.ImageFormat.SRGB,
-            data=rgb_frame
-        )
-
-        result = landmarker.detect(
-            mp_image
-        )
-
-        if not result.face_landmarks:
-
-            return None
-
-        face_landmarks = (
-            result.face_landmarks[0]
-        )
-
-        height, width = frame.shape[:2]
-
-        points = []
-
-        for landmark in face_landmarks:
-
-            x = int(
-                landmark.x * width
-            )
-
-            y = int(
-                landmark.y * height
-            )
-
-            points.append(
-                (x, y)
-            )
-
-        return points
-
-    except Exception as e:
-
-        print(
-            f"[WARNING] Landmark error: {e}"
-        )
-
-        return None
-
-
-# ============================================================
-# HEAD YAW
-# ============================================================
-
-def calculate_head_yaw(
-    landmarks
-):
-
-    try:
-
-        left_eye = np.mean(
-            np.array([
-                landmarks[33],
-                landmarks[133],
-                landmarks[160],
-                landmarks[159]
-            ]),
-            axis=0
-        )
-
-        right_eye = np.mean(
-            np.array([
-                landmarks[362],
-                landmarks[263],
-                landmarks[385],
-                landmarks[386]
-            ]),
-            axis=0
-        )
-
-        nose = np.array(
-            landmarks[1]
-        )
-
-        eye_center = (
-            left_eye +
-            right_eye
-        ) / 2.0
-
-        eye_distance = np.linalg.norm(
-            right_eye -
-            left_eye
-        )
-
-        if eye_distance == 0:
-
-            return 0
-
-        normalized_position = (
-            nose[0] -
-            eye_center[0]
-        ) / eye_distance
-
-        yaw = (
-            normalized_position *
-            60.0
-        )
-
-        return yaw
-
-    except Exception:
-
-        return 0
-
-
-# ============================================================
-# FACE RECOGNITION
-# ============================================================
-
-def recognize_face(
-    detector,
-    recognizer,
-    frame,
-    known_faces
-):
-
-    if not known_faces:
-
-        return "NO_USERS", 0.0
-
-    height, width = frame.shape[:2]
-
-    detector.setInputSize(
-        (width, height)
-    )
-
-    try:
-
-        _, faces = detector.detect(
-            frame
-        )
-
-    except Exception as e:
-
-        print(
-            f"[WARNING] Face detection error: {e}"
-        )
-
-        return "UNKNOWN", 0.0
-
-    if faces is None or len(faces) == 0:
-
-        return "NO_FACE", 0.0
-
-    # Largest face
-    face = max(
-        faces,
-        key=lambda f: f[2] * f[3]
-    )
-
-    try:
-
-        aligned_face = recognizer.alignCrop(
-            frame,
-            face
-        )
-
-        feature = recognizer.feature(
-            aligned_face
-        )
-
-        feature = feature.astype(
-            np.float32
-        )
-
-        feature = feature.reshape(
-            1,
-            -1
-        )
-
-        norm = np.linalg.norm(
-            feature
-        )
-
-        if norm == 0:
-
-            return "UNKNOWN", 0.0
-
-        feature = feature / norm
-
-    except Exception as e:
-
-        print(
-            f"[WARNING] Feature extraction error: {e}"
-        )
-
-        return "UNKNOWN", 0.0
-
-    scores = []
-
-    for username, known_feature in known_faces.items():
-
-        try:
-
-            score = recognizer.match(
-                feature,
-                known_feature,
-                cv2.FaceRecognizerSF_FR_COSINE
-            )
-
-            scores.append(
-                (
-                    username,
-                    float(score)
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                f"[WARNING] Match error "
-                f"for {username}: {e}"
-            )
-
-    if not scores:
-
-        return "UNKNOWN", 0.0
-
-    # Highest score first
-    scores.sort(
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    # --------------------------------------------------------
-    # PRINT SCORES
-    # --------------------------------------------------------
-
-    print(
-        "\n[RECOGNITION SCORES]"
-    )
-
-    for username, score in scores:
-
-        print(
-            f"  {username}: {score:.4f}"
-        )
-
-    # --------------------------------------------------------
-    # Best match
-    # --------------------------------------------------------
-
-    best_name = scores[0][0]
-    best_score = scores[0][1]
-
-    if len(scores) > 1:
-
-        second_score = scores[1][1]
-
-    else:
-
-        second_score = 0.0
-
-    margin = (
-        best_score -
-        second_score
-    )
-
-    print(
-        f"  Best: {best_name}"
-    )
-
-    print(
-        f"  Best score: {best_score:.4f}"
-    )
-
-    print(
-        f"  Margin: {margin:.4f}"
-    )
-
-    print(
-        f"  Required threshold: "
-        f"{RECOGNITION_THRESHOLD:.4f}"
-    )
-
-    # --------------------------------------------------------
-    # Decision
-    # --------------------------------------------------------
-
-    if best_score >= RECOGNITION_THRESHOLD:
-
-        # If only one authorized user exists
-        if len(scores) == 1:
-
-            return (
-                best_name,
-                best_score
-            )
-
-        # Multiple users require margin
-        if margin >= RECOGNITION_MARGIN:
-
-            return (
-                best_name,
-                best_score
-            )
-
-    return (
-        "UNKNOWN",
-        best_score
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def start_door_lock():
-
-    print("\n")
-    print("=" * 60)
-    print("           AI FACE DOOR LOCK")
-    print("=" * 60)
-
-    # --------------------------------------------------------
-    # Load detector
-    # --------------------------------------------------------
-
-    detector = load_detector()
-
-    if detector is None:
 
         return
 
     # --------------------------------------------------------
-    # Load recognizer
-    # --------------------------------------------------------
-
-    recognizer = load_recognizer()
-
-    if recognizer is None:
-
-        return
-
-    # --------------------------------------------------------
-    # Load landmark model
-    # --------------------------------------------------------
-
-    landmarker = load_landmarker()
-
-    if landmarker is None:
-
-        return
-
-    # --------------------------------------------------------
-    # Load users
+    # Load authorized users
     # --------------------------------------------------------
 
     known_faces = load_known_faces()
@@ -843,682 +1030,179 @@ def start_door_lock():
     if not known_faces:
 
         print(
-            "\n[INFO] No authorized users are enrolled."
+            "\n[ERROR] No authorized users found."
         )
 
         print(
             "Please enroll a user first."
         )
 
-        try:
-            landmarker.close()
-        except Exception:
-            pass
-
         return
 
     # --------------------------------------------------------
-    # Camera
+    # Open camera
     # --------------------------------------------------------
 
-    cap = open_camera()
+    cap = open_working_camera()
 
     if cap is None:
 
-        try:
-            landmarker.close()
-        except Exception:
-            pass
+        print(
+            "\n[ERROR] No working camera found."
+        )
 
         return
 
-    # --------------------------------------------------------
-    # State
-    # --------------------------------------------------------
-
-    blink_closed_count = 0
-
-    blink_detected = False
-
-    open_frames = 0
-
-    challenge_started = False
-
-    challenge_start_time = 0
-
-    required_direction = None
-
-    first_turn_detected = False
-
-    liveness_passed = False
-
-    recognized_name = "UNKNOWN"
-
-    recognized_score = 0.0
-
-    access_granted = False
-
-    unlock_time = 0
-
-    last_recognition_time = 0
-
-    # Prevent recognition from running
-    # unnecessarily many times
-    RECOGNITION_INTERVAL = 0.5
-
     print("\n")
-    print("=" * 60)
+    print("============================================================")
     print("DOOR LOCK ACTIVE")
-    print("=" * 60)
+    print("============================================================")
     print("Look at the camera.")
     print("Blink and turn your head when requested.")
     print("Press Q to exit.")
-    print("=" * 60)
+    print("============================================================")
 
-    # ========================================================
-    # LOOP
-    # ========================================================
+    door_locked = True
 
-    while True:
+    try:
 
-        ret, frame = cap.read()
+        while True:
 
-        if not ret or frame is None:
+            # ------------------------------------------------
+            # WAIT FOR FACE
+            # ------------------------------------------------
 
-            print(
-                "[WARNING] Could not read camera frame."
+            ret, frame = cap.read()
+
+            if not ret:
+                continue
+
+            detector.setInputSize(
+                (
+                    frame.shape[1],
+                    frame.shape[0]
+                )
             )
-
-            continue
-
-        height, width = frame.shape[:2]
-
-        # ----------------------------------------------------
-        # FACE DETECTION
-        # ----------------------------------------------------
-
-        detector.setInputSize(
-            (width, height)
-        )
-
-        try:
 
             _, faces = detector.detect(
                 frame
             )
 
-        except Exception:
-
-            faces = None
-
-        status = "LOOKING FOR FACE"
-
-        # ----------------------------------------------------
-        # NO FACE
-        # ----------------------------------------------------
-
-        if faces is None or len(faces) == 0:
-
-            status = "NO FACE DETECTED"
-
-            blink_closed_count = 0
-            open_frames = 0
-
-            recognized_name = "UNKNOWN"
-            recognized_score = 0.0
-
-            challenge_started = False
-            first_turn_detected = False
-            blink_detected = False
-            liveness_passed = False
-
-        else:
-
-            # ------------------------------------------------
-            # Largest face
-            # ------------------------------------------------
-
-            face = max(
-                faces,
-                key=lambda f: f[2] * f[3]
+            face_present = (
+                faces is not None
+                and len(faces) > 0
             )
 
-            x, y, w, h = map(
-                int,
-                face[:4]
-            )
+            if face_present:
 
-            x = max(
-                0,
-                x
-            )
+                cv2.putText(
+                    frame,
+                    "FACE DETECTED",
+                    (30, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2
+                )
 
-            y = max(
-                0,
-                y
-            )
+                cv2.imshow(
+                    "AI Face Door Lock",
+                    frame
+                )
 
-            w = min(
-                w,
-                width - x
-            )
+                cv2.waitKey(500)
 
-            h = min(
-                h,
-                height - y
-            )
+                # ============================================
+                # ONE AUTHENTICATION ATTEMPT
+                # ============================================
 
-            # ------------------------------------------------
-            # Draw face
-            # ------------------------------------------------
-
-            cv2.rectangle(
-                frame,
-                (x, y),
-                (x + w, y + h),
-                (255, 255, 255),
-                2
-            )
-
-            # ------------------------------------------------
-            # Recognition
-            # ------------------------------------------------
-
-            current_time = time.time()
-
-            if (
-                current_time -
-                last_recognition_time
-                >= RECOGNITION_INTERVAL
-            ):
-
-                (
-                    recognized_name,
-                    recognized_score
-                ) = recognize_face(
+                granted = authenticate(
+                    cap,
                     detector,
                     recognizer,
-                    frame,
+                    landmarker,
                     known_faces
                 )
 
-                last_recognition_time = (
-                    current_time
-                )
+                if granted:
 
-            # ------------------------------------------------
-            # Landmarks
-            # ------------------------------------------------
-
-            landmarks = get_landmarks(
-                landmarker,
-                frame
-            )
-
-            yaw = 0.0
-            ear = 0.0
-
-            if landmarks is not None:
-
-                left_ear = calculate_ear(
-                    landmarks,
-                    LEFT_EYE
-                )
-
-                right_ear = calculate_ear(
-                    landmarks,
-                    RIGHT_EYE
-                )
-
-                ear = (
-                    left_ear +
-                    right_ear
-                ) / 2.0
-
-                # --------------------------------------------
-                # Blink
-                # --------------------------------------------
-
-                if ear < EAR_CLOSED_THRESHOLD:
-
-                    blink_closed_count += 1
-
-                else:
-
-                    if (
-                        blink_closed_count
-                        >= BLINK_CLOSED_FRAMES
-                    ):
-
-                        blink_detected = True
-
-                    blink_closed_count = 0
-
-                # --------------------------------------------
-                # Open eyes after blink
-                # --------------------------------------------
-
-                if (
-                    blink_detected
-                    and ear > EAR_OPEN_THRESHOLD
-                ):
-
-                    open_frames += 1
-
-                # --------------------------------------------
-                # Head yaw
-                # --------------------------------------------
-
-                yaw = calculate_head_yaw(
-                    landmarks
-                )
-
-            # ------------------------------------------------
-            # Start challenge
-            # ------------------------------------------------
-
-            if (
-                recognized_name != "UNKNOWN"
-                and recognized_name != "NO_FACE"
-                and recognized_name != "NO_USERS"
-                and not challenge_started
-                and not liveness_passed
-                and not access_granted
-            ):
-
-                challenge_started = True
-
-                challenge_start_time = (
-                    time.time()
-                )
-
-                required_direction = (
-                    np.random.choice(
-                        ["LEFT", "RIGHT"]
-                    )
-                )
-
-                blink_detected = False
-                blink_closed_count = 0
-                open_frames = 0
-                first_turn_detected = False
-
-                print(
-                    f"\n[LIVENESS] Turn your head "
-                    f"{required_direction}"
-                )
-
-            # ------------------------------------------------
-            # LIVENESS
-            # ------------------------------------------------
-
-            if (
-                challenge_started
-                and not liveness_passed
-            ):
-
-                elapsed = (
-                    time.time() -
-                    challenge_start_time
-                )
-
-                if elapsed > CHALLENGE_TIMEOUT:
+                    door_locked = False
 
                     print(
-                        "\n[LIVENESS] "
-                        "Challenge timed out."
-                    )
-
-                    challenge_started = False
-
-                    blink_detected = False
-                    blink_closed_count = 0
-                    open_frames = 0
-                    first_turn_detected = False
-
-                else:
-
-                    # ----------------------------------------
-                    # Blink first
-                    # ----------------------------------------
-
-                    if not blink_detected:
-
-                        status = "BLINK"
-
-                    # ----------------------------------------
-                    # Head movement
-                    # ----------------------------------------
-
-                    elif not first_turn_detected:
-
-                        status = (
-                            "TURN HEAD "
-                            + required_direction
-                        )
-
-                        if (
-                            required_direction
-                            == "LEFT"
-                        ):
-
-                            if yaw < -YAW_REQUIRED:
-
-                                first_turn_detected = True
-
-                        else:
-
-                            if yaw > YAW_REQUIRED:
-
-                                first_turn_detected = True
-
-                    # ----------------------------------------
-                    # Liveness success
-                    # ----------------------------------------
-
-                    if (
-                        blink_detected
-                        and first_turn_detected
-                        and open_frames >=
-                        OPEN_AFTER_BLINK_FRAMES
-                    ):
-
-                        liveness_passed = True
-
-                        challenge_started = False
-
-                        print(
-                            "\n[LIVENESS] PASSED"
-                        )
-
-            # ------------------------------------------------
-            # ACCESS DECISION
-            # ------------------------------------------------
-
-            if liveness_passed:
-
-                if (
-                    recognized_name != "UNKNOWN"
-                    and recognized_name != "NO_FACE"
-                ):
-
-                    access_granted = True
-
-                    unlock_time = (
-                        time.time()
+                        "\n[DOOR] UNLOCKED"
                     )
 
                     print(
-                        f"\n[ACCESS GRANTED] "
-                        f"{recognized_name}"
+                        "Door will remain unlocked for 5 seconds."
                     )
+
+                    time.sleep(5)
+
+                    door_locked = True
 
                     print(
-                        f"[MATCH SCORE] "
-                        f"{recognized_score:.4f}"
-                    )
-
-                    print(
-                        "[DOOR] UNLOCKED"
-                    )
-
-                    log_access(
-                        recognized_name,
-                        "GRANTED"
+                        "[DOOR] Locked again."
                     )
 
                 else:
 
-                    print(
-                        "\n[ACCESS DENIED]"
-                    )
+                    door_locked = True
 
                     print(
-                        f"[BEST SCORE] "
-                        f"{recognized_score:.4f}"
+                        "\n[DOOR] Remains LOCKED."
                     )
 
-                    log_access(
-                        "UNKNOWN",
-                        "DENIED"
-                    )
-
-                # Reset challenge
-                liveness_passed = False
-                blink_detected = False
-                blink_closed_count = 0
-                open_frames = 0
-                first_turn_detected = False
-
-        # ====================================================
-        # DOOR TIMER
-        # ====================================================
-
-        if access_granted:
-
-            elapsed_unlock = (
-                time.time() -
-                unlock_time
-            )
-
-            if elapsed_unlock >= 5:
-
-                access_granted = False
-
-                recognized_name = "UNKNOWN"
-                recognized_score = 0.0
-
-                blink_detected = False
-                blink_closed_count = 0
-                open_frames = 0
-                first_turn_detected = False
-
-                print(
-                    "\n[DOOR] Locked again."
-                )
-
-        # ====================================================
-        # DISPLAY
-        # ====================================================
-
-        cv2.putText(
-            frame,
-            status,
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA
-        )
-
-        # ----------------------------------------------------
-        # User
-        # ----------------------------------------------------
-
-        if recognized_name not in [
-            "UNKNOWN",
-            "NO_FACE",
-            "NO_USERS"
-        ]:
-
-            cv2.putText(
-                frame,
-                f"User: {recognized_name}",
-                (20, 75),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA
-            )
-
-            cv2.putText(
-                frame,
-                f"Score: {recognized_score:.3f}",
-                (20, 105),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA
-            )
-
-        # ----------------------------------------------------
-        # Blink
-        # ----------------------------------------------------
-
-        blink_text = (
-            "YES"
-            if blink_detected
-            else "NO"
-        )
-
-        cv2.putText(
-            frame,
-            f"Blink: {blink_text}",
-            (20, 140),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA
-        )
-
-        # ----------------------------------------------------
-        # Door
-        # ----------------------------------------------------
-
-        if access_granted:
-
-            door_text = "DOOR: UNLOCKED"
-
-        else:
-
-            door_text = "DOOR: LOCKED"
-
-        cv2.putText(
-            frame,
-            door_text,
-            (20, height - 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA
-        )
-
-        # ----------------------------------------------------
-        # Challenge
-        # ----------------------------------------------------
-
-        if challenge_started:
-
-            if not blink_detected:
-
-                challenge_text = "BLINK"
-
-            elif not first_turn_detected:
-
-                challenge_text = (
-                    "TURN "
-                    + required_direction
-                )
+                    # Short cooldown so the same face
+                    # isn't immediately processed again
+                    time.sleep(2)
 
             else:
 
-                challenge_text = "PROCESSING..."
+                cv2.putText(
+                    frame,
+                    "DOOR LOCKED - WAITING FOR FACE",
+                    (30, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 255),
+                    2
+                )
 
-            cv2.putText(
-                frame,
-                challenge_text,
-                (20, height - 65),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA
-            )
+                cv2.imshow(
+                    "AI Face Door Lock",
+                    frame
+                )
 
-        # ----------------------------------------------------
-        # Camera window
-        # ----------------------------------------------------
+            key = cv2.waitKey(1) & 0xFF
 
-        cv2.imshow(
-            "AI Face Door Lock",
-            frame
-        )
+            if key == ord("q"):
 
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord("q"):
-
-            print(
-                "\nStopping door lock..."
-            )
-
-            break
-
-    # ========================================================
-    # CLEANUP
-    # ========================================================
-
-    cap.release()
-
-    cv2.destroyAllWindows()
-
-    try:
-
-        landmarker.close()
-
-    except Exception:
-
-        pass
-
-    print(
-        "\nDoor lock stopped."
-    )
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-
-    try:
-
-        start_door_lock()
+                break
 
     except KeyboardInterrupt:
 
         print(
-            "\n\nProgram interrupted by user."
+            "\nProgram interrupted by user."
         )
-
-    except Exception as e:
-
-        print(
-            "\n[ERROR] Unexpected error:"
-        )
-
-        print(
-            str(e)
-        )
-
-        import traceback
-
-        traceback.print_exc()
 
     finally:
 
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
+        cap.release()
+
+        cv2.destroyAllWindows()
 
         print(
-            "\nPress Enter to return..."
+            "\n[OK] Camera released."
         )
 
-        input()
+        print(
+            "[OK] Door lock stopped."
+        )
+
+
+# ============================================================
+# PROGRAM ENTRY
+# ============================================================
+
+if __name__ == "__main__":
+    main()
