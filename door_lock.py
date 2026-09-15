@@ -367,30 +367,62 @@ def estimate_head_yaw(landmarks, frame):
 
 
 # ============================================================
-# UI
+# UI - CAMERA LEFT / CONTROL PANEL RIGHT
 # ============================================================
 
-def put_centered_text(
-    frame,
-    text,
-    y,
-    scale=1.0,
-    thickness=2,
-    color=(255, 255, 255)
-):
-    width = frame.shape[1]
+PANEL_WIDTH = 390
+CAMERA_WIDTH = 960
+CAMERA_HEIGHT = 600
 
-    size, _ = cv2.getTextSize(
-        text,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        thickness
+# OpenCV uses BGR.
+WHITE = (245, 245, 245)
+MUTED = (165, 175, 185)
+CYAN = (255, 220, 80)
+GREEN = (80, 220, 120)
+RED = (80, 80, 235)
+AMBER = (60, 190, 255)
+DARK_PANEL = (28, 32, 38)
+DARKER = (20, 23, 28)
+BORDER = (55, 62, 72)
+
+
+def fit_camera(frame):
+    return cv2.resize(
+        frame,
+        (CAMERA_WIDTH, CAMERA_HEIGHT),
+        interpolation=cv2.INTER_AREA
     )
 
-    x = max(10, (width - size[0]) // 2)
 
+def draw_panel_card(canvas, x, y, w, h):
+    cv2.rectangle(
+        canvas,
+        (x, y),
+        (x + w, y + h),
+        BORDER,
+        1,
+        cv2.LINE_AA
+    )
+    cv2.rectangle(
+        canvas,
+        (x + 1, y + 1),
+        (x + w - 1, y + h - 1),
+        DARK_PANEL,
+        -1
+    )
+
+
+def panel_text(
+    canvas,
+    text,
+    x,
+    y,
+    scale=0.62,
+    color=WHITE,
+    thickness=1
+):
     cv2.putText(
-        frame,
+        canvas,
         text,
         (x, y),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -401,87 +433,337 @@ def put_centered_text(
     )
 
 
-def show_locked(frame, message="Look at the camera"):
-    cv2.putText(
-        frame,
-        "DOOR LOCKED",
-        (30, 50),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
-        (0, 0, 255),
-        3,
-        cv2.LINE_AA
+def panel_header(canvas, title, subtitle=None):
+    panel_text(
+        canvas,
+        title,
+        24,
+        48,
+        0.82,
+        WHITE,
+        2
     )
 
-    put_centered_text(
-        frame,
-        message,
-        110,
-        0.85,
-        2,
-        (255, 255, 255)
-    )
+    if subtitle:
+        panel_text(
+            canvas,
+            subtitle,
+            24,
+            75,
+            0.48,
+            MUTED,
+            1
+        )
 
-    cv2.putText(
-        frame,
-        "SPACE = Authenticate    Q = Exit",
-        (30, frame.shape[0] - 25),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (200, 200, 200),
+    cv2.line(
+        canvas,
+        (24, 92),
+        (PANEL_WIDTH - 24, 92),
+        BORDER,
         1,
         cv2.LINE_AA
+    )
+
+
+def make_layout(camera_frame):
+    camera = fit_camera(camera_frame)
+
+    canvas = np.full(
+        (CAMERA_HEIGHT, CAMERA_WIDTH + PANEL_WIDTH, 3),
+        DARKER,
+        dtype=np.uint8
+    )
+
+    canvas[:, :CAMERA_WIDTH] = camera
+
+    # Camera border.
+    cv2.rectangle(
+        canvas,
+        (0, 0),
+        (CAMERA_WIDTH - 1, CAMERA_HEIGHT - 1),
+        BORDER,
+        1
+    )
+
+    # Right panel.
+    cv2.rectangle(
+        canvas,
+        (CAMERA_WIDTH, 0),
+        (CAMERA_WIDTH + PANEL_WIDTH, CAMERA_HEIGHT),
+        DARKER,
+        -1
+    )
+
+    cv2.line(
+        canvas,
+        (CAMERA_WIDTH, 0),
+        (CAMERA_WIDTH, CAMERA_HEIGHT),
+        BORDER,
+        2
+    )
+
+    return canvas
+
+
+def show_panel(
+    frame,
+    title="DOOR LOCKED",
+    subtitle="AI SECURITY SYSTEM",
+    status="Waiting for authentication",
+    status_color=AMBER,
+    step=0,
+    step1="Blink",
+    step1_done=False,
+    step2="Turn head",
+    step2_done=False,
+    user_name=None,
+    score=None,
+    unlocked=False,
+    instruction="SPACE  Authenticate",
+    extra=None
+):
+    canvas = make_layout(frame)
+
+    x = CAMERA_WIDTH + 1
+
+    # Header
+    panel_header(
+        canvas[:, x:],
+        title,
+        subtitle
+    )
+
+    # Status card
+    draw_panel_card(
+        canvas,
+        x + 18,
+        115,
+        PANEL_WIDTH - 36,
+        100
+    )
+
+    panel_text(
+        canvas,
+        "STATUS",
+        x + 36,
+        143,
+        0.45,
+        MUTED,
+        1
+    )
+
+    panel_text(
+        canvas,
+        status,
+        x + 36,
+        177,
+        0.63,
+        status_color,
+        2
+    )
+
+    if extra:
+        panel_text(
+            canvas,
+            extra,
+            x + 36,
+            198,
+            0.43,
+            MUTED,
+            1
+        )
+
+    # Authentication card
+    draw_panel_card(
+        canvas,
+        x + 18,
+        232,
+        PANEL_WIDTH - 36,
+        190
+    )
+
+    panel_text(
+        canvas,
+        "AUTHENTICATION",
+        x + 36,
+        260,
+        0.58,
+        WHITE,
+        2
+    )
+
+    # Step 1
+    if step1_done:
+        icon1 = "✓"
+        color1 = GREEN
+        detail1 = "Verified"
+    elif step == 1:
+        icon1 = "●"
+        color1 = AMBER
+        detail1 = "Blink once"
+    else:
+        icon1 = "○"
+        color1 = MUTED
+        detail1 = "Waiting"
+
+    panel_text(
+        canvas,
+        icon1,
+        x + 38,
+        304,
+        0.72,
+        color1,
+        2
+    )
+    panel_text(
+        canvas,
+        "01  " + step1,
+        x + 70,
+        304,
+        0.58,
+        WHITE if step == 1 else MUTED,
+        2
+    )
+    panel_text(
+        canvas,
+        detail1,
+        x + 70,
+        327,
+        0.43,
+        color1,
+        1
+    )
+
+    # Step 2
+    if step2_done:
+        icon2 = "✓"
+        color2 = GREEN
+        detail2 = "Verified"
+    elif step == 2:
+        icon2 = "●"
+        color2 = AMBER
+        detail2 = "Turn LEFT or RIGHT"
+    else:
+        icon2 = "○"
+        color2 = MUTED
+        detail2 = "Waiting"
+
+    panel_text(
+        canvas,
+        icon2,
+        x + 38,
+        367,
+        0.72,
+        color2,
+        2
+    )
+    panel_text(
+        canvas,
+        "02  " + step2,
+        x + 70,
+        367,
+        0.58,
+        WHITE if step == 2 else MUTED,
+        2
+    )
+    panel_text(
+        canvas,
+        detail2,
+        x + 70,
+        390,
+        0.43,
+        color2,
+        1
+    )
+
+    # Recognition result
+    if user_name is not None or score is not None:
+        draw_panel_card(
+            canvas,
+            x + 18,
+            438,
+            PANEL_WIDTH - 36,
+            82
+        )
+
+        panel_text(
+            canvas,
+            "FACE MATCH",
+            x + 36,
+            463,
+            0.43,
+            MUTED,
+            1
+        )
+
+        if user_name is not None:
+            panel_text(
+                canvas,
+                str(user_name),
+                x + 36,
+                495,
+                0.62,
+                GREEN if unlocked else RED,
+                2
+            )
+
+        if score is not None:
+            panel_text(
+                canvas,
+                f"Score  {score:.3f}",
+                x + 185,
+                495,
+                0.48,
+                WHITE,
+                1
+            )
+
+    # Bottom instruction
+    if unlocked:
+        bottom = "Q  Exit"
+    else:
+        bottom = instruction
+
+    panel_text(
+        canvas,
+        bottom,
+        x + 24,
+        CAMERA_HEIGHT - 25,
+        0.52,
+        WHITE,
+        2
+    )
+
+    return canvas
+
+
+def show_locked(frame, message="Look at the camera"):
+    return show_panel(
+        frame,
+        title="DOOR LOCKED",
+        subtitle="AI SECURITY SYSTEM",
+        status=message,
+        status_color=AMBER,
+        step=0,
+        instruction="SPACE  Authenticate     Q  Exit"
     )
 
 
 def show_unlocked(frame, user_name):
-    cv2.putText(
+    return show_panel(
         frame,
-        "DOOR UNLOCKED",
-        (30, 60),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.15,
-        (0, 255, 0),
-        3,
-        cv2.LINE_AA
-    )
-
-    put_centered_text(
-        frame,
-        f"Welcome {user_name}",
-        125,
-        0.9,
-        2,
-        (0, 255, 0)
-    )
-
-    put_centered_text(
-        frame,
-        "ACCESS GRANTED",
-        170,
-        0.75,
-        2,
-        (255, 255, 255)
-    )
-
-    put_centered_text(
-        frame,
-        "Door will remain unlocked",
-        215,
-        0.65,
-        2,
-        (255, 255, 255)
-    )
-
-    cv2.putText(
-        frame,
-        "Q = Exit",
-        (30, frame.shape[0] - 25),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (200, 200, 200),
-        1,
-        cv2.LINE_AA
+        title="DOOR UNLOCKED",
+        subtitle="ACCESS CONTROL",
+        status="ACCESS GRANTED",
+        status_color=GREEN,
+        step=0,
+        step1="Liveness",
+        step1_done=True,
+        step2="Recognition",
+        step2_done=True,
+        user_name=user_name,
+        unlocked=True,
+        instruction="Q  Exit"
     )
 
 
@@ -490,52 +772,52 @@ def show_challenge(
     title,
     status,
     face=None,
-    status_color=(255, 255, 255)
+    status_color=WHITE
 ):
+    if title == "BLINK NOW":
+        step = 1
+        step1_done = False
+        step2_done = False
+        auth_title = "AUTHENTICATION"
+    elif title == "BLINK VERIFIED":
+        step = 2
+        step1_done = True
+        step2_done = False
+        auth_title = "AUTHENTICATION"
+    elif title == "HEAD TURN VERIFIED":
+        step = 3
+        step1_done = True
+        step2_done = True
+        auth_title = "AUTHENTICATION"
+    elif title == "RECOGNIZING":
+        step = 3
+        step1_done = True
+        step2_done = True
+        auth_title = "RECOGNITION"
+    else:
+        step = 0
+        step1_done = False
+        step2_done = False
+        auth_title = "AUTHENTICATION"
+
     draw_face_box(
         frame,
         face,
         (0, 255, 255)
     )
 
-    cv2.putText(
+    return show_panel(
         frame,
-        "AUTHENTICATION",
-        (30, 45),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 255, 255),
-        2,
-        cv2.LINE_AA
-    )
-
-    put_centered_text(
-        frame,
-        title,
-        115,
-        1.0,
-        3,
-        (255, 255, 255)
-    )
-
-    put_centered_text(
-        frame,
-        status,
-        165,
-        0.75,
-        2,
-        status_color
-    )
-
-    cv2.putText(
-        frame,
-        "Q = Cancel",
-        (30, frame.shape[0] - 25),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (200, 200, 200),
-        1,
-        cv2.LINE_AA
+        title=auth_title,
+        subtitle="GUIDED VERIFICATION",
+        status=status,
+        status_color=status_color,
+        step=step,
+        step1="Blink",
+        step1_done=step1_done,
+        step2="Turn head",
+        step2_done=step2_done,
+        instruction="Q  Cancel"
     )
 
 
@@ -550,7 +832,6 @@ def blink_challenge(cap, landmarker, detector):
     print("Blink once.")
 
     start = time.time()
-
     open_frames = 0
     closed_frames = 0
     baseline_ready = False
@@ -561,20 +842,17 @@ def blink_challenge(cap, landmarker, detector):
         if not ret or frame is None:
             continue
 
-        face = detect_face(
-            detector,
-            frame
-        )
+        face = detect_face(detector, frame)
 
         if face is None:
-            show_challenge(
+            display = show_challenge(
                 frame,
                 "BLINK NOW",
                 "Face not detected",
                 None,
-                (0, 0, 255)
+                RED
             )
-            cv2.imshow(WINDOW_NAME, frame)
+            cv2.imshow(WINDOW_NAME, display)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 return False
@@ -592,7 +870,6 @@ def blink_challenge(cap, landmarker, detector):
         )
 
         if ear is not None:
-
             if not baseline_ready:
                 if ear > EAR_OPEN_THRESHOLD:
                     open_frames += 1
@@ -609,47 +886,31 @@ def blink_challenge(cap, landmarker, detector):
                     if closed_frames >= BLINK_CLOSED_FRAMES:
                         print("[LIVENESS] Blink detected.")
 
-                        show_challenge(
+                        display = show_challenge(
                             frame,
                             "BLINK VERIFIED",
                             "Get ready to turn your head",
                             face,
-                            (0, 255, 0)
+                            GREEN
                         )
-
-                        cv2.imshow(
-                            WINDOW_NAME,
-                            frame
-                        )
-                        cv2.waitKey(600)
+                        cv2.imshow(WINDOW_NAME, display)
+                        cv2.waitKey(700)
 
                         return True
 
                     closed_frames = 0
 
-        show_challenge(
+        display = show_challenge(
             frame,
             "BLINK NOW",
             "Close and open your eyes once",
             face,
-            (255, 255, 255)
+            AMBER
         )
-
-        if ear is not None:
-            cv2.putText(
-                frame,
-                f"EAR: {ear:.2f}",
-                (30, 210),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (200, 200, 200),
-                1,
-                cv2.LINE_AA
-            )
 
         cv2.imshow(
             WINDOW_NAME,
-            frame
+            display
         )
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -677,24 +938,17 @@ def head_turn_challenge(cap, landmarker, detector):
         if not ret or frame is None:
             continue
 
-        face = detect_face(
-            detector,
-            frame
-        )
+        face = detect_face(detector, frame)
 
         if face is None:
-            show_challenge(
+            display = show_challenge(
                 frame,
                 "TURN HEAD",
                 "Face not detected",
                 None,
-                (0, 0, 255)
+                RED
             )
-
-            cv2.imshow(
-                WINDOW_NAME,
-                frame
-            )
+            cv2.imshow(WINDOW_NAME, display)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 return False
@@ -711,80 +965,67 @@ def head_turn_challenge(cap, landmarker, detector):
             frame
         )
 
-        direction_text = "LEFT or RIGHT"
-
         if yaw is not None:
             if yaw < -YAW_REQUIRED:
-                direction_text = "LEFT DETECTED"
-
                 print(
                     f"[LIVENESS] Head turned LEFT "
                     f"(yaw={yaw:.1f})"
                 )
 
-                show_challenge(
+                display = show_challenge(
                     frame,
                     "HEAD TURN VERIFIED",
                     "LEFT detected",
                     face,
-                    (0, 255, 0)
+                    GREEN
                 )
-
-                cv2.imshow(
-                    WINDOW_NAME,
-                    frame
-                )
-                cv2.waitKey(600)
+                cv2.imshow(WINDOW_NAME, display)
+                cv2.waitKey(700)
 
                 return True
 
             if yaw > YAW_REQUIRED:
-                direction_text = "RIGHT DETECTED"
-
                 print(
                     f"[LIVENESS] Head turned RIGHT "
                     f"(yaw={yaw:.1f})"
                 )
 
-                show_challenge(
+                display = show_challenge(
                     frame,
                     "HEAD TURN VERIFIED",
                     "RIGHT detected",
                     face,
-                    (0, 255, 0)
+                    GREEN
                 )
-
-                cv2.imshow(
-                    WINDOW_NAME,
-                    frame
-                )
-                cv2.waitKey(600)
+                cv2.imshow(WINDOW_NAME, display)
+                cv2.waitKey(700)
 
                 return True
 
-        show_challenge(
+        display = show_challenge(
             frame,
             "TURN HEAD",
-            direction_text,
+            "Turn LEFT or RIGHT",
             face,
-            (255, 255, 255)
+            AMBER
         )
 
         if yaw is not None:
+            # Small camera-side diagnostic, not center-screen text.
             cv2.putText(
-                frame,
+                display,
                 f"Yaw: {yaw:.1f}",
-                (30, 210),
+                (25, CAMERA_HEIGHT - 50),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (200, 200, 200),
+                0.55,
+                MUTED,
                 1,
                 cv2.LINE_AA
             )
 
         cv2.imshow(
             WINDOW_NAME,
-            frame
+            display
         )
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -814,11 +1055,7 @@ def load_known_faces():
 
         try:
             feature = np.load(path)
-
-            name = os.path.splitext(
-                filename
-            )[0]
-
+            name = os.path.splitext(filename)[0]
             known_faces[name] = feature
 
             print(
@@ -936,17 +1173,17 @@ def recognition_step(
         )
 
         if face is None:
-            show_challenge(
+            display = show_challenge(
                 frame,
                 "RECOGNIZING",
                 "Face not detected",
                 None,
-                (0, 0, 255)
+                RED
             )
 
             cv2.imshow(
                 WINDOW_NAME,
-                frame
+                display
             )
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -963,17 +1200,17 @@ def recognition_step(
         if feature is not None:
             samples.append(feature)
 
-        show_challenge(
+        display = show_challenge(
             frame,
             "RECOGNIZING",
             f"Analyzing {len(samples)}/{RECOGNITION_SAMPLES}",
             face,
-            (0, 255, 255)
+            CYAN
         )
 
         cv2.imshow(
             WINDOW_NAME,
-            frame
+            display
         )
 
         if cv2.waitKey(100) & 0xFF == ord("q"):
@@ -1006,15 +1243,9 @@ def recognition_step(
     ):
         print(f"  {name}: {score:.4f}")
 
-    print(
-        f"\n[AUTH] Best match: {best_name}"
-    )
-    print(
-        f"[AUTH] Match score: {best_score:.4f}"
-    )
-    print(
-        f"[AUTH] Margin: {margin:.4f}"
-    )
+    print(f"\n[AUTH] Best match: {best_name}")
+    print(f"[AUTH] Match score: {best_score:.4f}")
+    print(f"[AUTH] Margin: {margin:.4f}")
 
     if best_name is None:
         return False, None, best_score
@@ -1033,8 +1264,6 @@ def recognition_step(
 
         return False, best_name, best_score
 
-    # Only require a margin when multiple authorized
-    # users are enrolled.
     if (
         len(scores) > 1
         and margin < RECOGNITION_MARGIN
@@ -1075,68 +1304,42 @@ def show_result(
             continue
 
         if granted:
-            cv2.putText(
+            display = show_panel(
                 frame,
-                "ACCESS GRANTED",
-                (30, 70),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.1,
-                (0, 255, 0),
-                3,
-                cv2.LINE_AA
+                title="DOOR UNLOCKED",
+                subtitle="ACCESS CONTROL",
+                status="ACCESS GRANTED",
+                status_color=GREEN,
+                step=0,
+                step1="Blink",
+                step1_done=True,
+                step2="Head turn",
+                step2_done=True,
+                user_name=user_name,
+                score=score,
+                unlocked=True,
+                instruction="Q  Exit"
             )
-
-            put_centered_text(
-                frame,
-                "DOOR UNLOCKED",
-                145,
-                1.0,
-                3,
-                (0, 255, 0)
-            )
-
-            put_centered_text(
-                frame,
-                f"Welcome {user_name}",
-                195,
-                0.8,
-                2,
-                (255, 255, 255)
-            )
-
         else:
-            cv2.putText(
+            display = show_panel(
                 frame,
-                "ACCESS DENIED",
-                (30, 70),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.1,
-                (0, 0, 255),
-                3,
-                cv2.LINE_AA
-            )
-
-            put_centered_text(
-                frame,
-                "DOOR LOCKED",
-                145,
-                1.0,
-                3,
-                (0, 0, 255)
-            )
-
-            put_centered_text(
-                frame,
-                "Authentication failed",
-                195,
-                0.75,
-                2,
-                (255, 255, 255)
+                title="DOOR LOCKED",
+                subtitle="ACCESS CONTROL",
+                status="ACCESS DENIED",
+                status_color=RED,
+                step=0,
+                step1="Blink",
+                step1_done=True,
+                step2="Head turn",
+                step2_done=True,
+                user_name=user_name,
+                score=score,
+                instruction="R  Try again     Q  Exit"
             )
 
         cv2.imshow(
             WINDOW_NAME,
-            frame
+            display
         )
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -1289,6 +1492,16 @@ def main():
     door_locked = True
     authenticated_user = None
 
+    cv2.namedWindow(
+        WINDOW_NAME,
+        cv2.WINDOW_NORMAL
+    )
+    cv2.resizeWindow(
+        WINDOW_NAME,
+        CAMERA_WIDTH + PANEL_WIDTH,
+        CAMERA_HEIGHT
+    )
+
     print("\n========================================")
     print("SYSTEM READY")
     print("========================================")
@@ -1313,36 +1526,35 @@ def main():
                 frame
             )
 
-            draw_face_box(
-                frame,
-                face
-            )
-
             if face is None:
-                show_locked(
+                display = show_panel(
                     frame,
-                    "Look at the camera"
+                    title="DOOR LOCKED",
+                    subtitle="AI SECURITY SYSTEM",
+                    status="Look at the camera",
+                    status_color=AMBER,
+                    step=0,
+                    instruction="SPACE  Authenticate     Q  Exit"
                 )
             else:
-                show_locked(
+                draw_face_box(
                     frame,
-                    "Face detected - Press SPACE"
+                    face
                 )
 
-                cv2.putText(
+                display = show_panel(
                     frame,
-                    "FACE DETECTED",
-                    (30, 95),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 255, 255),
-                    2,
-                    cv2.LINE_AA
+                    title="DOOR LOCKED",
+                    subtitle="AI SECURITY SYSTEM",
+                    status="Face detected",
+                    status_color=GREEN,
+                    step=0,
+                    instruction="SPACE  Authenticate     Q  Exit"
                 )
 
             cv2.imshow(
                 WINDOW_NAME,
-                frame
+                display
             )
 
             key = cv2.waitKey(1) & 0xFF
@@ -1351,7 +1563,6 @@ def main():
                 print("\n[EXIT] Program closed.")
                 return
 
-            # SPACE starts exactly ONE guided authentication.
             if key == 32 and face is not None:
                 print("\n[AUTH] Starting authentication...")
 
@@ -1365,7 +1576,7 @@ def main():
 
                 if granted:
                     # IMPORTANT:
-                    # Never set this back to True automatically.
+                    # The door NEVER automatically relocks.
                     door_locked = False
                     authenticated_user = user_name
 
@@ -1379,7 +1590,6 @@ def main():
                     print("########################################")
 
                 else:
-                    # Stay locked.
                     print(
                         "\n[STATE] Door remains LOCKED."
                     )
@@ -1391,28 +1601,20 @@ def main():
         # ====================================================
         # UNLOCKED STATE
         # ====================================================
-        #
-        # NOTHING is authenticated here.
-        # No blink check.
-        # No head-turn check.
-        # No face recognition.
-        #
-        # The door stays unlocked until Q.
-        # ====================================================
         while not door_locked:
             ret, frame = cap.read()
 
             if not ret or frame is None:
                 continue
 
-            show_unlocked(
+            display = show_unlocked(
                 frame,
                 authenticated_user
             )
 
             cv2.imshow(
                 WINDOW_NAME,
-                frame
+                display
             )
 
             key = cv2.waitKey(1) & 0xFF
@@ -1420,10 +1622,7 @@ def main():
             if key == ord("q"):
                 print("\n========================================")
                 print("Program terminated.")
-                print(
-                    "Door was left UNLOCKED "
-                    "for this simulation."
-                )
+                print("Door was left UNLOCKED for this simulation.")
                 print("========================================")
                 break
 
