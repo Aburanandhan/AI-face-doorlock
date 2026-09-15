@@ -1,43 +1,24 @@
 import cv2
-import numpy as np
 import os
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
+import numpy as np
+import sys
 
 DETECTOR_MODEL = "models/face_detection_yunet_2023mar.onnx"
 RECOGNITION_MODEL = "models/face_recognition_sface_2021dec.onnx"
 
 KNOWN_FACES_DIR = "known_faces"
 
-
-# ============================================================
-# CHECK REQUIRED MODELS
-# ============================================================
-
-required_files = [
-    DETECTOR_MODEL,
-    RECOGNITION_MODEL
-]
-
-for file in required_files:
-
-    if not os.path.exists(file):
-
-        print(f"❌ Missing file: {file}")
-        input("Press ENTER to exit...")
-        exit()
+os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
 
 
 # ============================================================
-# CAMERA AUTO-DETECTION
+# CAMERA AUTO DETECTION
 # ============================================================
 
 def open_camera():
 
     print()
+    print("Opening camera...")
     print("🔍 Searching for webcam...")
     print()
 
@@ -47,96 +28,78 @@ def open_camera():
         ("Default", cv2.CAP_ANY)
     ]
 
-    # Try camera indexes 0 to 4
-    for index in range(5):
+    for index in range(6):
 
         for backend_name, backend in backends:
 
             print(
-                f"   Trying camera {index} "
-                f"({backend_name})..."
+                f"   Trying camera {index} ({backend_name})..."
             )
 
-            camera = cv2.VideoCapture(
-                index,
-                backend
-            )
+            cap = cv2.VideoCapture(index, backend)
 
-            if not camera.isOpened():
-
-                camera.release()
+            if not cap.isOpened():
+                cap.release()
                 continue
 
-            # Test whether the camera can actually
-            # capture a frame
-            ret, frame = camera.read()
+            ret = False
+            frame = None
 
-            if ret and frame is not None:
+            # Give camera some time to initialize
+            for _ in range(5):
 
-                print()
-                print(
-                    f"✅ Webcam found: "
-                    f"Camera {index} "
-                    f"({backend_name})"
-                )
-                print()
+                ret, frame = cap.read()
 
-                return camera
+                if ret and frame is not None:
+                    break
 
-            camera.release()
+            if not ret or frame is None:
+
+                print("      ❌ No frame")
+                cap.release()
+                continue
+
+            # Check whether the camera actually provides
+            # a useful image.
+            mean_value = float(np.mean(frame))
+            max_value = int(np.max(frame))
+            min_value = int(np.min(frame))
+
+            print(
+                f"      Frame: mean={mean_value:.2f}, "
+                f"min={min_value}, max={max_value}"
+            )
+
+            # Reject completely black / empty cameras
+            if max_value <= 5 or mean_value <= 1:
+
+                print("      ❌ Empty/black camera - skipping")
+                cap.release()
+                continue
+
+            print()
+            print(
+                f"✅ Webcam found: Camera {index} "
+                f"({backend_name})"
+            )
+            print()
+
+            return cap
 
     return None
-
-
-# ============================================================
-# CREATE FACE DETECTOR
-# ============================================================
-
-print("Loading YuNet...")
-
-detector = cv2.FaceDetectorYN.create(
-    DETECTOR_MODEL,
-    "",
-    (320, 240),
-    0.6,
-    0.3,
-    5000
-)
-
-print("✅ YuNet loaded")
-
-
-# ============================================================
-# CREATE SFACE RECOGNIZER
-# ============================================================
-
-print("Loading SFace...")
-
-recognizer = cv2.FaceRecognizerSF.create(
-    RECOGNITION_MODEL,
-    ""
-)
-
-print("✅ SFace loaded")
 
 
 # ============================================================
 # GET USER NAME
 # ============================================================
 
-print()
-print("====================================")
-print("      AI DOOR LOCK - ENROLLMENT")
-print("====================================")
-print()
-
 name = input("Enter person's name: ").strip()
 
 if not name:
 
     print("❌ Name cannot be empty")
-    input("Press ENTER to exit...")
-    exit()
+    input("\nPress Enter to exit...")
+    sys.exit()
 
 
 # ============================================================
@@ -148,26 +111,66 @@ filename = "".join(
     if c.isalnum() or c in (" ", "_", "-")
 ).strip()
 
-filename = filename.replace(
-    " ",
-    "_"
-)
+filename = filename.replace(" ", "_")
 
 if not filename:
 
     print("❌ Invalid name")
-    input("Press ENTER to exit...")
-    exit()
+    input("\nPress Enter to exit...")
+    sys.exit()
 
 
 # ============================================================
-# CREATE KNOWN FACES DIRECTORY
+# LOAD FACE DETECTOR
 # ============================================================
 
-os.makedirs(
-    KNOWN_FACES_DIR,
-    exist_ok=True
-)
+print()
+print("Loading face detection model...")
+
+try:
+
+    detector = cv2.FaceDetectorYN.create(
+        DETECTOR_MODEL,
+        "",
+        (320, 240),
+        0.6,
+        0.3,
+        5000
+    )
+
+except Exception as e:
+
+    print("❌ Failed to load face detector")
+    print(e)
+    input("\nPress Enter to exit...")
+    sys.exit()
+
+
+print("✅ Face detector loaded")
+
+
+# ============================================================
+# LOAD FACE RECOGNIZER
+# ============================================================
+
+print("Loading face recognition model...")
+
+try:
+
+    recognizer = cv2.FaceRecognizerSF.create(
+        RECOGNITION_MODEL,
+        ""
+    )
+
+except Exception as e:
+
+    print("❌ Failed to load face recognizer")
+    print(e)
+    input("\nPress Enter to exit...")
+    sys.exit()
+
+
+print("✅ Face recognizer loaded")
 
 
 # ============================================================
@@ -182,74 +185,56 @@ if cap is None:
     print("❌ No working webcam was found.")
     print()
     print("Please check:")
-    print("• Webcam is connected")
-    print("• Camera permission is enabled")
-    print("• Another application is not using the webcam")
+    print("1. Webcam is connected")
+    print("2. Camera permission is enabled")
+    print("3. No other application is using the camera")
     print()
 
-    input("Press ENTER to exit...")
-    exit()
+    input("Press Enter to exit...")
+    sys.exit()
 
 
 # ============================================================
-# ENROLLMENT INSTRUCTIONS
+# ENROLLMENT
 # ============================================================
 
-print()
+print("================================")
 print(f"Enrolling: {name}")
+print("================================")
 print()
 print("Look directly at the camera.")
-print("Keep your face inside the green box.")
-print("Press SPACE to enroll your face.")
+print("Press SPACE to save the face.")
 print("Press Q to cancel.")
 print()
 
-
-# ============================================================
-# MAIN ENROLLMENT LOOP
-# ============================================================
 
 while True:
 
     ret, frame = cap.read()
 
-    if not ret:
+    if not ret or frame is None:
 
-        print("❌ Failed to read camera")
+        print("❌ Camera frame failed")
         break
 
 
-    # --------------------------------------------------------
-    # IMAGE SIZE
-    # --------------------------------------------------------
-
     h, w = frame.shape[:2]
 
-    detector.setInputSize(
-        (w, h)
-    )
+    detector.setInputSize((w, h))
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # FACE DETECTION
-    # --------------------------------------------------------
+    # ========================================================
 
-    _, faces = detector.detect(
-        frame
-    )
+    _, faces = detector.detect(frame)
 
-
-    # --------------------------------------------------------
-    # DRAW DETECTED FACES
-    # --------------------------------------------------------
 
     if faces is not None:
 
         for face in faces:
 
-            x, y, fw, fh = (
-                face[:4].astype(int)
-            )
+            x, y, fw, fh = face[:4].astype(int)
 
             cv2.rectangle(
                 frame,
@@ -262,10 +247,7 @@ while True:
             cv2.putText(
                 frame,
                 "FACE DETECTED",
-                (
-                    x,
-                    max(y - 10, 20)
-                ),
+                (x, max(y - 10, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
                 (0, 255, 0),
@@ -273,13 +255,13 @@ while True:
             )
 
 
-    # --------------------------------------------------------
-    # INSTRUCTIONS ON SCREEN
-    # --------------------------------------------------------
+    # ========================================================
+    # DISPLAY INSTRUCTIONS
+    # ========================================================
 
     cv2.putText(
         frame,
-        "SPACE = Enroll | Q = Quit",
+        "SPACE = Save | Q = Cancel",
         (20, 35),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
@@ -288,64 +270,53 @@ while True:
     )
 
 
-    # --------------------------------------------------------
-    # SHOW CAMERA
-    # --------------------------------------------------------
-
     cv2.imshow(
-        "AI Door Lock - Enrollment",
+        "Enroll Authorized User",
         frame
     )
 
 
-    # --------------------------------------------------------
-    # KEYBOARD
-    # --------------------------------------------------------
-
     key = cv2.waitKey(1) & 0xFF
 
 
-    # --------------------------------------------------------
-    # QUIT
-    # --------------------------------------------------------
+    # ========================================================
+    # CANCEL
+    # ========================================================
 
     if key == ord("q"):
 
+        print()
         print("Enrollment cancelled.")
         break
 
 
-    # --------------------------------------------------------
-    # ENROLL
-    # --------------------------------------------------------
+    # ========================================================
+    # SAVE FACE
+    # ========================================================
 
     if key == 32:
 
-        # No face
+        print()
+        print("Processing face...")
+
+
+        # ----------------------------------------------------
+        # CHECK FACE
+        # ----------------------------------------------------
+
         if faces is None or len(faces) == 0:
 
-            print(
-                "❌ No face detected. "
-                "Try again."
-            )
-
+            print("❌ No face detected")
+            print("Please position your face inside the camera.")
             continue
 
 
-        # Multiple faces
         if len(faces) > 1:
 
-            print(
-                "❌ Multiple faces detected. "
-                "Only one person should be visible."
-            )
-
+            print("❌ Multiple faces detected")
+            print("Only one person should be visible.")
             continue
 
-
-        # ----------------------------------------------------
-        # GET FACE
-        # ----------------------------------------------------
 
         face = faces[0]
 
@@ -354,18 +325,51 @@ while True:
         # ALIGN FACE
         # ----------------------------------------------------
 
-        aligned_face = recognizer.alignCrop(
-            frame,
-            face
-        )
+        try:
+
+            aligned_face = recognizer.alignCrop(
+                frame,
+                face
+            )
+
+        except Exception as e:
+
+            print("❌ Face alignment failed")
+            print(e)
+            continue
+
+
+        if aligned_face is None:
+
+            print("❌ Aligned face is empty")
+            continue
 
 
         # ----------------------------------------------------
-        # GENERATE SFACE FEATURE
+        # GENERATE FACE FEATURE
         # ----------------------------------------------------
 
-        feature = recognizer.feature(
-            aligned_face
+        try:
+
+            feature = recognizer.feature(
+                aligned_face
+            )
+
+        except Exception as e:
+
+            print("❌ Face feature generation failed")
+            print(e)
+            continue
+
+
+        if feature is None:
+
+            print("❌ Recognition feature is empty")
+            continue
+
+
+        print(
+            f"✅ Feature generated: shape={feature.shape}"
         )
 
 
@@ -373,28 +377,62 @@ while True:
         # SAVE FEATURE
         # ----------------------------------------------------
 
-        save_path = os.path.join(
-            KNOWN_FACES_DIR,
-            f"{filename}.npy"
-        )
-
-        np.save(
-            save_path,
-            feature
+        save_path = os.path.abspath(
+            os.path.join(
+                KNOWN_FACES_DIR,
+                filename + ".npy"
+            )
         )
 
 
+        print()
+        print("Saving face feature...")
+        print(f"Path: {save_path}")
+
+
+        try:
+
+            np.save(
+                save_path,
+                feature
+            )
+
+        except Exception as e:
+
+            print("❌ Failed to save face feature")
+            print(e)
+            continue
+
+
         # ----------------------------------------------------
-        # SUCCESS
+        # VERIFY FILE
         # ----------------------------------------------------
 
-        print()
-        print("====================================")
-        print("✅ FACE ENROLLED SUCCESSFULLY")
-        print("====================================")
-        print(f"Name: {name}")
-        print(f"Saved to: {save_path}")
-        print()
+        if os.path.exists(save_path):
+
+            file_size = os.path.getsize(
+                save_path
+            )
+
+            print()
+            print("================================")
+            print("       ✅ USER ENROLLED")
+            print("================================")
+            print()
+            print(f"Name: {name}")
+            print(f"File: {save_path}")
+            print(f"Size: {file_size} bytes")
+            print()
+            print("You can now start the Door Lock.")
+            print()
+
+        else:
+
+            print()
+            print("❌ File was not created!")
+            print()
+            print("Expected path:")
+            print(save_path)
 
         break
 
@@ -406,3 +444,5 @@ while True:
 cap.release()
 
 cv2.destroyAllWindows()
+
+input("Press Enter to continue...")
