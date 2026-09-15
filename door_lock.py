@@ -22,14 +22,18 @@ LANDMARK_MODEL = "models/face_landmarker.task"
 KNOWN_FACES_DIR = "known_faces"
 LOG_FILE = "logs/access_log.txt"
 
-CAMERA_INDEX = 1
 
 # IMPORTANT:
 # Start with 0.50 instead of the old 0.363.
 # We can calibrate this later using recognition_test.py.
+
 RECOGNITION_THRESHOLD = 0.50
 
-# Liveness
+
+# ============================================================
+# LIVENESS CONFIGURATION
+# ============================================================
+
 YAW_REQUIRED = 15.0
 
 EAR_OPEN_THRESHOLD = 0.23
@@ -43,7 +47,7 @@ CHALLENGE_TIMEOUT = 15
 
 
 # ============================================================
-# CHECK FILES
+# CHECK REQUIRED FILES
 # ============================================================
 
 required_files = [
@@ -57,12 +61,15 @@ for file in required_files:
     if not os.path.exists(file):
 
         print(f"❌ Missing file: {file}")
+        input("Press ENTER to exit...")
         exit()
 
 
 if not os.path.exists(KNOWN_FACES_DIR):
 
     print("❌ known_faces folder not found")
+    print("Run enroll_user.py first.")
+    input("Press ENTER to exit...")
     exit()
 
 
@@ -151,7 +158,9 @@ for file in os.listdir(KNOWN_FACES_DIR):
 
         authorized_faces[name] = feature
 
-        print(f"✅ Loaded: {name}")
+        print(
+            f"✅ Loaded: {name}"
+        )
 
     except Exception as e:
 
@@ -165,6 +174,7 @@ if len(authorized_faces) == 0:
     print()
     print("❌ No authorized faces found.")
     print("Run enroll_user.py first.")
+    input("Press ENTER to exit...")
     exit()
 
 
@@ -238,7 +248,10 @@ RIGHT_EYE = [
 ]
 
 
-def distance(p1, p2):
+def distance(
+    p1,
+    p2
+):
 
     return math.sqrt(
         (p1.x - p2.x) ** 2 +
@@ -283,12 +296,12 @@ def calculate_ear(
 
 MODEL_POINTS = np.array([
 
-    (0.0, 0.0, 0.0),           # Nose
-    (0.0, -63.6, -12.5),       # Chin
-    (-43.3, 32.7, -26.0),      # Right eye
-    (43.3, 32.7, -26.0),       # Left eye
-    (-28.9, -28.9, -24.1),     # Mouth left
-    (28.9, -28.9, -24.1)       # Mouth right
+    (0.0, 0.0, 0.0),
+    (0.0, -63.6, -12.5),
+    (-43.3, 32.7, -26.0),
+    (43.3, 32.7, -26.0),
+    (-28.9, -28.9, -24.1),
+    (28.9, -28.9, -24.1)
 
 ], dtype=np.float64)
 
@@ -337,9 +350,23 @@ def get_head_pose(
 
     camera_matrix = np.array([
 
-        [focal_length, 0, width / 2],
-        [0, focal_length, height / 2],
-        [0, 0, 1]
+        [
+            focal_length,
+            0,
+            width / 2
+        ],
+
+        [
+            0,
+            focal_length,
+            height / 2
+        ],
+
+        [
+            0,
+            0,
+            1
+        ]
 
     ], dtype=np.float64)
 
@@ -353,6 +380,7 @@ def get_head_pose(
         image_points,
         camera_matrix,
         distortion,
+
         flags=cv2.SOLVEPNP_ITERATIVE
 
     )
@@ -442,19 +470,80 @@ liveness = reset_liveness()
 
 
 # ============================================================
-# CAMERA
+# CAMERA AUTO-DETECTION
 # ============================================================
 
-print("Opening camera...")
+def open_camera():
 
-cap = cv2.VideoCapture(
-    CAMERA_INDEX,
-    cv2.CAP_DSHOW
-)
+    print()
+    print("Opening camera...")
+    print("🔍 Searching for webcam...")
+    print()
 
-if not cap.isOpened():
+    backends = [
+        ("DirectShow", cv2.CAP_DSHOW),
+        ("Media Foundation", cv2.CAP_MSMF),
+        ("Default", cv2.CAP_ANY)
+    ]
 
-    print("❌ Camera could not be opened")
+    # Try camera indexes 0 to 4
+    for index in range(5):
+
+        for backend_name, backend in backends:
+
+            print(
+                f"   Trying camera {index} "
+                f"({backend_name})..."
+            )
+
+            camera = cv2.VideoCapture(
+                index,
+                backend
+            )
+
+            if not camera.isOpened():
+
+                camera.release()
+                continue
+
+            # Verify camera actually produces a frame
+            ret, frame = camera.read()
+
+            if ret and frame is not None:
+
+                print()
+                print(
+                    f"✅ Webcam found: "
+                    f"Camera {index} "
+                    f"({backend_name})"
+                )
+                print()
+
+                return camera
+
+            camera.release()
+
+    return None
+
+
+# ============================================================
+# OPEN CAMERA
+# ============================================================
+
+cap = open_camera()
+
+if cap is None:
+
+    print()
+    print("❌ No working webcam was found.")
+    print()
+    print("Please check:")
+    print("• Webcam is connected")
+    print("• Camera permission is enabled")
+    print("• Another application is not using the webcam")
+    print()
+
+    input("Press ENTER to exit...")
     exit()
 
 
@@ -463,6 +552,7 @@ print()
 print("Press Q to quit.")
 print("Press R to restart authentication.")
 print()
+
 
 # ============================================================
 # SYSTEM STATE
@@ -496,7 +586,9 @@ while True:
         print("❌ Failed to read camera")
         break
 
+
     h, w = frame.shape[:2]
+
 
     # --------------------------------------------------------
     # DISPLAY MIRRORED
@@ -506,6 +598,7 @@ while True:
         frame,
         1
     )
+
 
     # --------------------------------------------------------
     # DETECTION
@@ -519,12 +612,14 @@ while True:
         frame
     )
 
+
     # Default state
     door_unlocked = False
 
     recognized_name = "Unknown"
 
     best_similarity = 0.0
+
 
     # ========================================================
     # NO FACE
@@ -542,10 +637,10 @@ while True:
             2
         )
 
-        # Restart liveness
         liveness = reset_liveness()
 
         authentication_done = False
+
 
     # ========================================================
     # MULTIPLE FACES
@@ -583,6 +678,7 @@ while True:
 
         authentication_done = False
 
+
     # ========================================================
     # ONE FACE
     # ========================================================
@@ -594,6 +690,7 @@ while True:
         x, y, fw, fh = (
             face[:4].astype(int)
         )
+
 
         # ====================================================
         # LIVENESS
@@ -620,7 +717,9 @@ while True:
                 timestamp
             )
 
-            liveness_status = "CHECKING LIVENESS"
+            liveness_status = (
+                "CHECKING LIVENESS"
+            )
 
             liveness_color = (
                 0,
@@ -628,9 +727,12 @@ while True:
                 255
             )
 
+
             if result.face_landmarks:
 
-                landmarks = result.face_landmarks[0]
+                landmarks = (
+                    result.face_landmarks[0]
+                )
 
                 pose = get_head_pose(
                     landmarks,
@@ -659,6 +761,7 @@ while True:
 
                     state = liveness["state"]
 
+
                     # ========================================
                     # BASELINE
                     # ========================================
@@ -676,7 +779,9 @@ while True:
                             ].append(yaw)
 
                         if len(
-                            liveness["baseline_yaws"]
+                            liveness[
+                                "baseline_yaws"
+                            ]
                         ) >= OPEN_BASELINE_FRAMES:
 
                             liveness[
@@ -692,6 +797,7 @@ while True:
                             liveness[
                                 "state"
                             ] = "BLINK"
+
 
                     # ========================================
                     # BLINK
@@ -743,6 +849,7 @@ while True:
                                 "blink_closed"
                             ] = 0
 
+
                     # ========================================
                     # HEAD TURN
                     # ========================================
@@ -769,6 +876,7 @@ while True:
                             yaw - baseline
                         )
 
+
                         # LEFT / RIGHT
                         if challenge == "LEFT":
 
@@ -793,6 +901,7 @@ while True:
                                 liveness[
                                     "head_turn_done"
                                 ] = True
+
 
                         # ====================================
                         # PASSED
@@ -828,6 +937,7 @@ while True:
                             )
                             print()
 
+
                     # ========================================
                     # PASSED
                     # ========================================
@@ -844,7 +954,11 @@ while True:
                             0
                         )
 
-                    # Display values
+
+                    # ========================================
+                    # DISPLAY VALUES
+                    # ========================================
+
                     cv2.putText(
                         display,
                         f"Yaw: {yaw:.1f}",
@@ -864,6 +978,7 @@ while True:
                         (255, 255, 255),
                         2
                     )
+
 
             # ------------------------------------------------
             # DRAW LIVENESS STATUS
@@ -887,6 +1002,7 @@ while True:
                 2
             )
 
+
         # ====================================================
         # RECOGNITION
         # ====================================================
@@ -902,6 +1018,7 @@ while True:
                 face
             )
 
+
             # ------------------------------------------------
             # FEATURE
             # ------------------------------------------------
@@ -909,6 +1026,7 @@ while True:
             feature = recognizer.feature(
                 aligned_face
             )
+
 
             # ------------------------------------------------
             # COMPARE AGAINST EVERY USER
@@ -918,7 +1036,9 @@ while True:
 
             best_score = -1.0
 
-            for name, known_feature in authorized_faces.items():
+            for name, known_feature in (
+                authorized_faces.items()
+            ):
 
                 score = recognizer.match(
                     known_feature,
@@ -936,7 +1056,9 @@ while True:
 
                     best_name = name
 
+
             best_similarity = best_score
+
 
             # =================================================
             # AUTHORIZATION
@@ -958,6 +1080,7 @@ while True:
                 )
 
                 status = "ACCESS GRANTED"
+
 
                 cv2.putText(
                     display,
@@ -985,6 +1108,7 @@ while True:
                     2
                 )
 
+
             else:
 
                 recognized_name = "Unknown"
@@ -998,6 +1122,7 @@ while True:
                 )
 
                 status = "ACCESS DENIED"
+
 
                 cv2.putText(
                     display,
@@ -1025,6 +1150,7 @@ while True:
                     2
                 )
 
+
             # ------------------------------------------------
             # FACE BOX
             # ------------------------------------------------
@@ -1036,6 +1162,7 @@ while True:
                 box_color,
                 3
             )
+
 
             # ------------------------------------------------
             # LOG
@@ -1084,6 +1211,7 @@ while True:
             255
         )
 
+
     cv2.putText(
         display,
         door_text,
@@ -1096,6 +1224,7 @@ while True:
         door_color,
         3
     )
+
 
     # ========================================================
     # SIMILARITY
@@ -1114,6 +1243,7 @@ while True:
         2
     )
 
+
     # ========================================================
     # DISPLAY
     # ========================================================
@@ -1123,7 +1253,9 @@ while True:
         display
     )
 
+
     key = cv2.waitKey(1) & 0xFF
+
 
     # ========================================================
     # QUIT
@@ -1132,6 +1264,7 @@ while True:
     if key == ord("q"):
 
         break
+
 
     # ========================================================
     # RESTART
